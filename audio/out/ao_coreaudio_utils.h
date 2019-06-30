@@ -63,7 +63,7 @@ bool ca_asbd_equals(const AudioStreamBasicDescription *a,
 bool ca_asbd_equals_integer_mode_hack(const AudioStreamBasicDescription *a,
                     const AudioStreamBasicDescription *b);
 int ca_asbd_to_mp_format(const AudioStreamBasicDescription *asbd);
-int ca_asbd_to_mp_format_integer_mode_hack(const AudioStreamBasicDescription *asbd);
+int ca_asbd_to_mp_format_integer_mode_unpacked_24_device_hack(const AudioStreamBasicDescription *asbd);
 int ca_asbd_to_mp_format_integer_mode_packed_24_device_hack(const AudioStreamBasicDescription *asbd);
 bool ca_asbd_is_better(AudioStreamBasicDescription *req,
                        AudioStreamBasicDescription *old,

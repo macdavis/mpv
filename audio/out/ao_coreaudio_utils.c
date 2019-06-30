@@ -96,18 +96,17 @@ coreaudio_error:
     return;
 }
 
-// Optimisation. 
-// Increase CoreAudio Frame Buffer Size (reduce CPU load) for 2 benefits, 
+// Increase CoreAudio Frame Buffer Size (reduce CPU load) for 2 benefits,
     // energy saving and (potentially) improve sound quality.
 
 // On my system (build-in and USB DAC), Frame Buffer Size in float mode can go up to device's maximum value,
-    // while that in integer mode can only go to 2043 frames (larger than that will course clicks/distortion). 
+    // while that in integer mode can only go to 2043 frames (larger than that will course clicks/distortion).
 
 //The actual required Frame Buffer Size range can be different from the device's hardware Frame Size range,
     //e.g., my built-in device's hardware Frame Size range is "14-4096 frames", but the minimum Frame Size
-    //to play a Hi-res audio (24/96) is "29 frames" and CoreAudio will automatically increase the size. 
+    //to play a Hi-res audio (24/96) is "29 frames" and CoreAudio will automatically increase the size.
 
-//The actual Frame Buffer Size is retrieved from "Latency property fsiz". 
+//The actual Frame Buffer Size is retrieved from "Latency property fsiz".
 
 //Setting the Buffer Size beyond the Frame Size range is still playable, as summarised in the following table.
     //Senario                     Frame Size we set here    The actual Frame Buffer Size
@@ -134,10 +133,10 @@ OSStatus ca_get_Device_Transport_Type(struct ao *ao, AudioDeviceID device)
     OSStatus err1 = CA_GET_O(device, kAudioDevicePropertyDataSource, &Source);
 
     if (err == noErr){
+        // "kAudioDevicePropertyDataSource" only works for limited Transport Type, e.g. not work for USB or Bluetooth connection.
         if (err1 == noErr){
             MP_VERBOSE(ao, "Device transport type: %s, data source: %s\n", mp_tag_str(CFSwapInt32HostToBig(Transport_Type)),
             mp_tag_str(CFSwapInt32HostToBig(Source)));
-        //"kAudioDevicePropertyDataSource" only works for limited Transport Type, e.g. not work for USB or Bluetooth connection.
         }else{
             MP_VERBOSE(ao, "Device transport type: %s\n", mp_tag_str(CFSwapInt32HostToBig(Transport_Type)));
         }
@@ -147,20 +146,27 @@ OSStatus ca_get_Device_Transport_Type(struct ao *ao, AudioDeviceID device)
 
 OSStatus ca_set_frame_buffer_size(struct ao *ao, AudioDeviceID device, int *buffersize)
 {
-    //Reference: https://github.com/cmus/cmus/blob/master/op/coreaudio.c
+    // Reference: https://github.com/cmus/cmus/blob/master/op/coreaudio.c
     AudioValueRange value_range = {0, 0};
     OSStatus err1 = CA_GET_O(device, kAudioDevicePropertyBufferFrameSizeRange, &value_range);
     MP_VERBOSE(ao, "Frame buffer size: %g to %g frames\n", value_range.mMinimum, value_range.mMaximum);
 
     OSStatus err = CA_SET(device, kAudioDevicePropertyBufferFrameSize, buffersize);
-    if ((*buffersize >= value_range.mMinimum) && (*buffersize <= value_range.mMaximum)){
-        MP_VERBOSE(ao, "Set frame buffer size to %d frames\n", *buffersize);
-    }else if (*buffersize < value_range.mMinimum){
+
+    // e.g. 16 bit SPDIF AC-3 has a static buffer size of 1536 frames.
+    if (value_range.mMinimum == value_range.mMaximum){
         *buffersize = value_range.mMinimum;
-        MP_VERBOSE(ao, "Target frame size it invalid, set to %d (min) frames\n", *buffersize); 
+        MP_VERBOSE(ao, "Set frame buffer size to %d frames\n", *buffersize);
     }else{
-        *buffersize = value_range.mMaximum;
-        MP_VERBOSE(ao, "Target frame size it invalid, set to %d (max) frames\n", *buffersize); 
+        if ((*buffersize >= value_range.mMinimum) && (*buffersize <= value_range.mMaximum)){
+            MP_VERBOSE(ao, "Set frame buffer size to %d frames\n", *buffersize);
+        }else if (*buffersize < value_range.mMinimum){
+            *buffersize = value_range.mMinimum;
+            MP_VERBOSE(ao, "Target frame size it invalid, set to %d (min) frames\n", *buffersize);
+        }else{
+            *buffersize = value_range.mMaximum;
+            MP_VERBOSE(ao, "Target frame size it invalid, set to %d (max) frames\n", *buffersize);
+        }
     }
 
     return err & err1;
@@ -181,12 +187,12 @@ OSStatus ca_get_Terminal_Type(struct ao *ao, AudioDeviceID device)
 
     OSStatus ret = AudioObjectGetPropertyData(device, &propertyAddress, 0, NULL, &size, &val);
     if (ret == noErr) {
-        MP_VERBOSE(ao, "Stream Terminal Type: %s\n", mp_tag_str(CFSwapInt32HostToBig(val)));
+        MP_VERBOSE(ao, "Stream Terminal Type: %s\n",  mp_tag_str_hex(CFSwapInt32HostToBig(val)));
     }
     return ret;
 }
 
-// Optimization. Another way to set largest CoreAudio Frame Buffer Size.
+// Another way to set largest CoreAudio Frame Buffer Size.
 // Reference: https://developer.apple.com/library/archive/technotes/tn2321/_index.html
 
 OSStatus SetAudioPowerHintToFavorSavingPower(void)
@@ -194,7 +200,7 @@ OSStatus SetAudioPowerHintToFavorSavingPower(void)
 AudioObjectPropertyAddress theAddress = { kAudioHardwarePropertyPowerHint,
                                               kAudioObjectPropertyScopeGlobal,
                                               kAudioObjectPropertyElementMaster };
- 
+
     UInt32 thePowerHint = kAudioHardwarePowerHintFavorSavingPower;
     return AudioObjectSetPropertyData(kAudioObjectSystemObject,
                                     &theAddress,
@@ -203,17 +209,16 @@ AudioObjectPropertyAddress theAddress = { kAudioHardwarePropertyPowerHint,
                                      sizeof(UInt32), &thePowerHint);
 }
 
-// Optimisation. 
-// According to BitPerfect, reducing IOCycleUsage may improve audio quality. 
+// According to BitPerfect, reducing IOCycleUsage may improve audio quality.
 
-// The default value is 1. Lower than 1 will cause a/v sync problems (The audio will play ahead of video). 
+// The default value is 1. Lower than 1 will cause a/v sync problems (The audio will play ahead of video).
     // ONLY use for playing music.
 
 // Extreme low value could lead to audio corruption.
-    // (check whether there is "skipping cycle due to overload" message in Console). 
+    // (Check whether there is "skipping cycle due to overload" message in Console).
 
 // Lower CoreAudio Frame Buffer Size requires higher IOCycleUsage.
-    // In my system, 0.03 is safe for 24/48, 0.15 for 24/96 with I/O Buffer Size of 2043 Frame; 
+    // In my system, 0.03 is safe for 24/48, 0.15 for 24/96 with I/O Buffer Size of 2043 Frame;
     // 0.05 for 24/48 with I/O Buffer Size of 1024 Frame.
 
 OSStatus ca_IO_Cycle_Usage(struct ao *ao, AudioDeviceID device, Float32 *IOCycleUsage)
@@ -223,6 +228,9 @@ OSStatus ca_IO_Cycle_Usage(struct ao *ao, AudioDeviceID device, Float32 *IOCycle
    return err;
 }
 
+// In exclusive Mode, once audio is played, there is no way to check the current volume.
+// Use this to display volume, mute and balance.
+// For audiophiles, it is important to keep at 0dB in the digial region.
 OSStatus ca_get_ao_volume(struct ao *ao, AudioDeviceID device, UInt32 channel)
 {
     if (!device)
@@ -261,28 +269,28 @@ OSStatus ca_get_ao_volume(struct ao *ao, AudioDeviceID device, UInt32 channel)
             }else{
                 MP_VERBOSE(ao, "LFE volume: %.2f (%.1fdB)\n", SubVolumeScalar, SubVolumeDecibels);
             }
-        }   
+        }
 
         for (UInt32 j = 0; j <= channel;j++) {
 
             AudioObjectPropertyAddress prop = {
-                kAudioDevicePropertyVolumeScalar, 
-                kAudioDevicePropertyScopeOutput, 
+                kAudioDevicePropertyVolumeScalar,
+                kAudioDevicePropertyScopeOutput,
                 j
             };
 
             AudioObjectPropertyAddress prop_db = {
-                kAudioDevicePropertyVolumeDecibels, 
-                kAudioDevicePropertyScopeOutput, 
+                kAudioDevicePropertyVolumeDecibels,
+                kAudioDevicePropertyScopeOutput,
                 j
             };
 
             AudioObjectPropertyAddress prop_mute = {
-                kAudioDevicePropertyMute, 
-                kAudioDevicePropertyScopeOutput, 
+                kAudioDevicePropertyMute,
+                kAudioDevicePropertyScopeOutput,
                 j
             };
-          
+
 
             if (AudioObjectHasProperty(device, &prop)){
                 OSStatus VolumeScalar = AudioObjectGetPropertyData(device, &prop, 0, NULL, &dataSize, &volume);
@@ -352,7 +360,7 @@ OSStatus ca_select_device(struct ao *ao, char* name, AudioDeviceID *device)
         char *desc;
         OSStatus err2 = CA_GET_STR(*device, kAudioObjectPropertyName, &desc);
         if (err2 == noErr) {
-            MP_VERBOSE(ao, "Selected audio output device: %s (0x%02x)\n",
+            MP_VERBOSE(ao, "Selected audio output device: %s (0x%02X)\n",
                            desc, *device);
             talloc_free(desc);
         }
@@ -401,12 +409,9 @@ static void ca_fill_asbd_raw(AudioStreamBasicDescription *asbd, int mp_format,
         asbd->mFormatFlags |= kAudioFormatFlagIsBigEndian;
 
     asbd->mFramesPerPacket = 1;
-    if (asbd->mBitsPerChannel == 32){
-       asbd->mBytesPerPacket = asbd->mBytesPerFrame = 8; 
-    }else{
     asbd->mBytesPerPacket = asbd->mBytesPerFrame =
         asbd->mFramesPerPacket * channels_per_buffer *
-        (asbd->mBitsPerChannel / 8);}
+        (asbd->mBitsPerChannel / 8);
 }
 
 static void ca_fill_asbd_raw_packed_24_bit_device_hack(AudioStreamBasicDescription *asbd, int mp_format,
@@ -438,12 +443,14 @@ static void ca_fill_asbd_raw_packed_24_bit_device_hack(AudioStreamBasicDescripti
         asbd->mFormatFlags |= kAudioFormatFlagIsBigEndian;
 
     asbd->mFramesPerPacket = 1;
-    if (asbd->mBitsPerChannel == 32){
-       asbd->mBytesPerPacket = asbd->mBytesPerFrame = 6; 
+
+    if ((asbd->mBitsPerChannel == 32) && (asbd->mFormatFlags & kAudioFormatFlagIsSignedInteger)){
+        asbd->mBytesPerPacket = asbd->mBytesPerFrame = 6;
     }else{
-    asbd->mBytesPerPacket = asbd->mBytesPerFrame =
-        asbd->mFramesPerPacket * channels_per_buffer *
-        (asbd->mBitsPerChannel / 8);}
+        asbd->mBytesPerPacket = asbd->mBytesPerFrame =
+            asbd->mFramesPerPacket * channels_per_buffer *
+            (asbd->mBitsPerChannel / 8);
+    }
 }
 
 void ca_fill_asbd(struct ao *ao, AudioStreamBasicDescription *asbd)
@@ -496,11 +503,12 @@ bool ca_asbd_equals_integer_mode_hack(const AudioStreamBasicDescription *a,
 {
     bool spdif = ca_formatid_is_compressed(a->mFormatID) &&
                  ca_formatid_is_compressed(b->mFormatID);
+    // Delete "kAudioFormatFlagIsPacked" for unpacked 24 bit devices.
     int flags = kAudioFormatFlagIsFloat |
     kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsBigEndian;
 
     return (a->mFormatFlags & flags) == (b->mFormatFlags & flags) &&
-          a->mBitsPerChannel >= b->mBitsPerChannel &&
+          a->mBitsPerChannel >= b->mBitsPerChannel && //mpv doesn't have 24 bit integer format, only s32.
           ca_normalize_formatid(a->mFormatID) ==
           ca_normalize_formatid(b->mFormatID) &&
           (spdif || a->mBytesPerPacket == b->mBytesPerPacket) &&
@@ -522,7 +530,7 @@ int ca_asbd_to_mp_format(const AudioStreamBasicDescription *asbd)
     return 0;
 }
 
-int ca_asbd_to_mp_format_integer_mode_hack(const AudioStreamBasicDescription *asbd)
+int ca_asbd_to_mp_format_integer_mode_unpacked_24_device_hack(const AudioStreamBasicDescription *asbd)
 {
     for (int fmt = 1; fmt < AF_FORMAT_COUNT; fmt++) {
         AudioStreamBasicDescription mp_asbd = {0};
@@ -552,7 +560,7 @@ void ca_print_asbd(struct ao *ao, const char *description,
     uint32_t flags  = asbd->mFormatFlags;
     uint32_t swap   = CFSwapInt32HostToBig(asbd->mFormatID);
     char *format    = mp_tag_str(swap);
-    int mpfmt       = ca_asbd_to_mp_format_integer_mode_hack(asbd);
+    int mpfmt       = ca_asbd_to_mp_format_integer_mode_unpacked_24_device_hack(asbd);
     float SampleRate = asbd->mSampleRate / 1000;
     MP_VERBOSE(ao,
        "%s%s %" PRIu32 "/%g/%" PRIu32 "ch "
@@ -637,27 +645,28 @@ bool ca_virtual_asbd_is_better(AudioStreamBasicDescription *req,
                          new->mChannelsPerFrame))
         return false;
 
-// Optimisation. 
-// Turn off Integer Mode. 
-// Since "our format" is mixable, check mFormatFlags kAudioFormatFlagIsNonMixable will ensure physical format is also mixable.
+// Turn off Integer Mode.
+// Since "our format" is mixable, check mFormatFlags "kAudioFormatFlagIsNonMixable" will ensure physical format is also mixable.
 // In my system, W/O comparing mFormatFlags will make mpv choose unmixable format.
-// Now, virtual format will automatically set to 32-bit mixable float point and 
-// bypass the "24-bit padded in 32-bit" issue.
-   
+// In this case, virtual format will automatically set to 32-bit mixable float point.
+
     if ((req->mFormatFlags & kAudioFormatFlagIsNonMixable) != (new->mFormatFlags & kAudioFormatFlagIsNonMixable))
         return false;
     if ((req->mFormatFlags & kAudioFormatFlagIsNonMixable) != (old->mFormatFlags & kAudioFormatFlagIsNonMixable))
         return true;
-             
+
     return true;
 }
 
-// Optimisation (maybe). 
-// No. of channels should have higher priority than Bit depth when connecting to bluetooth.
-// My bluetooth device only have 2 physical formats. "16/8 1ch" and "32/48 2ch". 
-// The virtual format of my bluetooth device is "32-bit float" only. 
-// Not comparing mBitsPerChannel will lead to a "32-bit float" physical format even if a 16-bit file is played.
-// It doesn't really matter as long as CoreAudio can handle it.
+
+// My bluetooth device only have 2 physical formats. "8 (aligned high in 16 Bit)/8 1ch" and "32/48 2ch".
+// The virtual format of my bluetooth device is "32-bit float" only.
+// mpv mistakenly take "8 bit aligned high in 16 bit" as true s16.
+// Thus, we need to add another criteria, mBytesPerFrame > 3 (mBytesPerFrame of 8 bit is 2, while that of 16 bit is 4).
+    // In here, I deliberately set mBytesPerFrame > 5 because I found if not, for build-in device, the case of
+    // "32 bit float virtual formant and 16 bit physical format" will create truncation errors and increase the background noise.
+    // mBytesPerFrame > 5 simply means that even for true s16, the out physical format will be 32/24bit.
+// Just for test purpose here, the better solution might be separating this to two functions, one for Bluetooth and one for Build-in device.
 
 bool ca_bluetooth_asbd_is_better(AudioStreamBasicDescription *req,
                        AudioStreamBasicDescription *old,
@@ -681,7 +690,7 @@ bool ca_bluetooth_asbd_is_better(AudioStreamBasicDescription *req,
 
     if (!value_is_better(req->mChannelsPerFrame, old->mChannelsPerFrame,
                          new->mChannelsPerFrame))
-        return false; 
+        return false;
 
     return true;
 }
