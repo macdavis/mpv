@@ -75,12 +75,81 @@ struct priv {
     // Output s16 physical format, float32 virtual format, ac3/dts mpv format
     int spdif_hack;
 
+    struct ao_convert_fmt convert;
+
+    int integer_mode;
+
+    int buffersize;
+
+    UInt32 terminalType;
+
+    Float32 IOCycleUsage;
+
     bool changed_mixing;
 
     atomic_bool reload_requested;
 
     uint32_t hw_latency_us;
 };
+
+static bool integer_mode_unpacked_24_bit_device_hack(struct ao *ao)
+{
+
+    struct priv *p = ao->priv;
+    AudioStreamRangedDescription *formats;
+    size_t n_formats;
+
+    CA_GET_ARY(p->stream, kAudioStreamPropertyAvailablePhysicalFormats,    
+                     &formats, &n_formats);
+    //CHECK_CA_ERROR("could not get number of stream formats");       
+    int maxbitdepth_physical = 0;
+    int integer_mode_avaliable = 0;
+    for (int j = 0; j < n_formats; j++) {
+        AudioStreamBasicDescription *stream_asbd = &formats[j].mFormat;
+        if (stream_asbd->mBitsPerChannel > maxbitdepth_physical )
+            maxbitdepth_physical =stream_asbd->mBitsPerChannel;
+        if (stream_asbd->mFormatFlags & kAudioFormatFlagIsNonMixable)
+           integer_mode_avaliable = 1;
+        }
+
+    talloc_free(formats);
+
+    if ((integer_mode_avaliable == 1) && (maxbitdepth_physical == 24))
+        return false;
+
+    return true;
+}
+
+static bool integer_mode_packed_24_bit_device_hack(struct ao *ao)
+{
+
+    struct priv *p = ao->priv;
+    AudioStreamRangedDescription *formats;
+    size_t n_formats;
+
+    CA_GET_ARY(p->stream, kAudioStreamPropertyAvailablePhysicalFormats,    
+                     &formats, &n_formats);
+    //CHECK_CA_ERROR("could not get number of stream formats");       
+    int maxbitdepth_physical = 0;
+    int integer_mode_avaliable = 0;
+    int max_mBytesPerPacket = 0;
+    for (int j = 0; j < n_formats; j++) {
+        AudioStreamBasicDescription *stream_asbd = &formats[j].mFormat;
+        if (stream_asbd->mBitsPerChannel > maxbitdepth_physical)
+            maxbitdepth_physical =stream_asbd->mBitsPerChannel;
+        if (stream_asbd->mFormatFlags & kAudioFormatFlagIsNonMixable)
+            integer_mode_avaliable = 1;
+        if (stream_asbd->mBytesPerPacket > max_mBytesPerPacket)   
+            max_mBytesPerPacket = stream_asbd->mBytesPerPacket;
+        }
+
+    talloc_free(formats);
+
+    if ((integer_mode_avaliable == 1) && (maxbitdepth_physical == 24) && (max_mBytesPerPacket == 6))
+        return false;
+
+    return true;
+}
 
 static OSStatus property_listener_cb(
     AudioObjectID object, uint32_t n_addresses,
@@ -167,7 +236,46 @@ static OSStatus render_cb_compressed(
     struct priv *p   = ao->priv;
     AudioBuffer buf  = out_data->mBuffers[p->stream_idx];
     int requested    = buf.mDataByteSize;
-    int sstride      = p->spdif_hack ? 4 * ao->channels.num : ao->sstride;
+
+    AudioStreamRangedDescription *formats;
+    size_t n_formats;
+
+    CA_GET_ARY(p->stream, kAudioStreamPropertyAvailablePhysicalFormats,     
+                     &formats, &n_formats);
+    //CHECK_CA_ERROR("could not get number of stream formats");
+    int maxbitdepth_physical = 0;
+    int integer_mode_avaliable = 0;
+    int aligned_high = 0;
+    int max_mBytesPerPacket = 0;
+    for (int j = 0; j < n_formats; j++) { 
+        AudioStreamBasicDescription *stream_asbd = &formats[j].mFormat;
+        if (stream_asbd->mBitsPerChannel > maxbitdepth_physical)
+            maxbitdepth_physical =stream_asbd->mBitsPerChannel;
+        if (stream_asbd->mFormatFlags & kAudioFormatFlagIsNonMixable)
+            integer_mode_avaliable = 1;
+        if (stream_asbd->mFormatFlags & kAudioFormatFlagIsAlignedHigh)
+            aligned_high = 1;
+        if (stream_asbd->mBytesPerPacket > max_mBytesPerPacket)   
+            max_mBytesPerPacket = stream_asbd->mBytesPerPacket;
+    }
+
+    talloc_free(formats);
+
+    int sstride;
+
+    if ((integer_mode_avaliable == 1) && (maxbitdepth_physical == 24) && (max_mBytesPerPacket == 6)){
+        sstride = p->spdif_hack ? 4 * ao->channels.num : 6;
+    }else{
+        sstride = p->spdif_hack ? 4 * ao->channels.num : ao->sstride;
+    }
+
+    AudioStreamBasicDescription asbd;
+
+    if ((integer_mode_avaliable == 1) && (maxbitdepth_physical == 24) && (max_mBytesPerPacket == 6))
+    ca_fill_asbd_packed_24_bit_device_hack(ao, &asbd);
+    else
+    ca_fill_asbd(ao, &asbd);
+    
 
     int pseudo_frames = requested / sstride;
 
@@ -181,7 +289,61 @@ static OSStatus render_cb_compressed(
     end += p->hw_latency_us + ca_get_latency(ts)
         + ca_frames_to_us(ao, pseudo_frames);
 
-    ao_read_data(ao, &buf.mData, pseudo_frames, end);
+// Change feeding format. Only needed for s24 and (maybe) 24_aligned_high_in_32 deivce in Integer Mode.
+// (maxbitdepth_physical == 32) == 32 Bit device;
+// (integer_mode_avaliable == 1) && (maxbitdepth_physical == 24) && (aligned_high == 0) && (max_mBytesPerPacket == 8) == 24 Bit aligned low device;
+// (integer_mode_avaliable == 1) && (maxbitdepth_physical == 24) && (aligned_high == 1) && (max_mBytesPerPacket == 8) == 24 Bit aligned high device;
+// (integer_mode_avaliable == 1) && (maxbitdepth_physical == 24) && (max_mBytesPerPacket == 6) == s24 (packed) device
+    if ((asbd.mBitsPerChannel == 32) && (asbd.mFormatFlags & kAudioFormatFlagIsSignedInteger)){
+        //if ((integer_mode_avaliable == 1) && (maxbitdepth_physical == 24) && (aligned_high == 0) && (max_mBytesPerPacket == 8)){
+            //ao_read_data(ao, &buf.mData, pseudo_frames, end);
+            //p->convert = (struct ao_convert_fmt){
+            //.src_fmt = ao->format,
+            //.dst_bits = 32,
+            //.pad_msb = 0,
+            //.channels = ao->channels.num,
+            //};
+            //ao_read_data_converted(ao, &p->convert,
+            //&buf.mData, pseudo_frames, end);
+            //MP_INFO(ao, "24 Bit aligned low device, no conversion needed.\n");
+       //}else if (maxbitdepth_physical == 32){
+            //ao_read_data(ao, &buf.mData, pseudo_frames, end);
+            //p->convert = (struct ao_convert_fmt){
+            //.src_fmt = ao->format,
+            //.dst_bits = 32,
+            //.pad_msb = 0,
+            //.channels = ao->channels.num,
+            //};
+            //ao_read_data_converted(ao, &p->convert,
+            //&buf.mData, pseudo_frames, end);
+            //MP_INFO(ao, "32 Bit device, no conversion needed.\n");
+        //}else if ((integer_mode_avaliable == 1) && (maxbitdepth_physical == 24) && (aligned_high == 1) && (max_mBytesPerPacket == 8)){
+        if ((integer_mode_avaliable == 1) && (maxbitdepth_physical == 24) && (aligned_high == 1) && (max_mBytesPerPacket == 8)){
+            p->convert = (struct ao_convert_fmt){
+            .src_fmt = ao->format,
+            .dst_bits = 32,
+            .pad_msb = 8, // Acturally not sure whether data conversion is needed here.
+            .channels = ao->channels.num,
+            };
+            ao_read_data_converted(ao, &p->convert,
+            &buf.mData, pseudo_frames, end); 
+            MP_INFO(ao, "24 Bit aligned high device, convert to MSB padding.\n");
+        }else if ((integer_mode_avaliable == 1) && (maxbitdepth_physical == 24) && (max_mBytesPerPacket == 6)){
+            p->convert = (struct ao_convert_fmt){
+            .src_fmt = ao->format,
+            .dst_bits = 24,
+            //.pad_msb = 8,
+            .channels = ao->channels.num,
+            };
+            ao_read_data_converted(ao, &p->convert,
+            &buf.mData, pseudo_frames, end);
+            MP_INFO(ao, "24 Bit packed device, convert to s24.\n");
+        }else{
+            ao_read_data(ao, &buf.mData, pseudo_frames, end);
+        }
+    }else{
+        ao_read_data(ao, &buf.mData, pseudo_frames, end);
+    }
 
     if (p->spdif_hack)
         bad_hack_mygodwhy(buf.mData, pseudo_frames * ao->channels.num);
@@ -244,11 +406,16 @@ static int find_best_format(struct ao *ao, AudioStreamBasicDescription *out_fmt)
 
     // Build ASBD for the input format
     AudioStreamBasicDescription asbd;
-    ca_fill_asbd(ao, &asbd);
-    ca_print_asbd(ao, "our format:", &asbd);
+
+    if (!integer_mode_packed_24_bit_device_hack(ao)){
+        ca_fill_asbd_packed_24_bit_device_hack(ao, &asbd);
+        ca_print_asbd(ao, "Our format (packed hacking): ", &asbd);
+    }else{
+        ca_fill_asbd(ao, &asbd);
+        ca_print_asbd(ao, "Our format: ", &asbd);
+    }
 
     *out_fmt = (AudioStreamBasicDescription){0};
-
     AudioStreamRangedDescription *formats;
     size_t n_formats;
     OSStatus err;
@@ -260,10 +427,36 @@ static int find_best_format(struct ao *ao, AudioStreamBasicDescription *out_fmt)
     for (int j = 0; j < n_formats; j++) {
         AudioStreamBasicDescription *stream_asbd = &formats[j].mFormat;
 
-        ca_print_asbd(ao, "- ", stream_asbd);
+        ca_print_asbd(ao, "", stream_asbd);
 
-        if (!out_fmt->mFormatID || ca_asbd_is_better(&asbd, out_fmt, stream_asbd))
+        UInt32 TransportType;
+        OSStatus err1;
+        err1 = CA_GET_O(p->device, kAudioDevicePropertyTransportType, &TransportType);
+
+        if (err1 == noErr) {
+            if (TransportType == (kAudioDeviceTransportTypeBluetooth | kAudioDeviceTransportTypeBluetoothLE)){
+                if (!out_fmt->mFormatID || ca_bluetooth_asbd_is_better(&asbd, out_fmt, stream_asbd))
+                *out_fmt = *stream_asbd;
+            //For Build-In output, 32 Bit Virtual truncates to 16 Bit physical format will create background noise.
+            }else if (TransportType == kAudioDeviceTransportTypeBuiltIn & asbd.mBitsPerChannel == 16){      
+                if (!out_fmt->mFormatID || ca_bluetooth_asbd_is_better(&asbd, out_fmt, stream_asbd))
+                *out_fmt = *stream_asbd;
+            }else{
+                if (!out_fmt->mFormatID || ca_asbd_is_better(&asbd, out_fmt, stream_asbd))
+                *out_fmt = *stream_asbd;
+            }
+
+            if (p->integer_mode) {
+                if (!out_fmt->mFormatID || ca_asbd_is_better(&asbd, out_fmt, stream_asbd))
+                *out_fmt = *stream_asbd;
+            }else{
+                if (!out_fmt->mFormatID || ca_virtual_asbd_is_better(&asbd, out_fmt, stream_asbd))
+                *out_fmt = *stream_asbd;
+            }
+        }else{
+            if (!out_fmt->mFormatID || ca_asbd_is_better(&asbd, out_fmt, stream_asbd))
             *out_fmt = *stream_asbd;
+        }
     }
 
     talloc_free(formats);
@@ -315,6 +508,9 @@ static int init(struct ao *ao)
     err = ca_lock_device(p->device, &p->hog_pid);
     CHECK_CA_WARN("failed to set hogmode");
 
+    err = ca_get_Device_Transport_Type(ao, p->device);
+    CHECK_CA_WARN("failed to get device transport type");
+
     err = ca_disable_mixing(ao, p->device, &p->changed_mixing);
     CHECK_CA_WARN("failed to disable mixing");
 
@@ -336,10 +532,36 @@ static int init(struct ao *ao)
     if (!ca_init_chmap(ao, p->device))
         goto coreaudio_error;
 
+    err = ca_get_ao_volume(ao, p->device, ao->channels.num);
+    CHECK_CA_WARN("failed to check volume");
+
+    err = ca_get_Terminal_Type(ao, p->stream);
+    CHECK_CA_WARN("failed to check stream terminal type");
+
+    if (p->IOCycleUsage != 1 ){
+    err = ca_IO_Cycle_Usage(ao, p->device, &p->IOCycleUsage);
+    CHECK_CA_WARN("failed to set IOCycleUsage");
+    }
+
     err = CA_GET(p->stream, kAudioStreamPropertyVirtualFormat, &p->stream_asbd);
     CHECK_CA_ERROR("could not get stream's virtual format");
 
-    ca_print_asbd(ao, "virtual format", &p->stream_asbd);
+    if (p->stream_asbd.mFormatFlags & kAudioFormatFlagIsNonMixable){
+        MP_VERBOSE(ao, "Integer Mode is ON. \n");
+        err = ca_set_frame_buffer_size(ao, p->device, &p->buffersize);
+        CHECK_CA_WARN("failed to set buffersize");
+    }else if (p->buffersize == 1024 ){//Appearently this is not the correct way to do it.
+        err = ca_get_frame_buffer_size(ao, p->device, &p->buffersize);
+        CHECK_CA_WARN("failed to get buffersize range");
+        err = SetAudioPowerHintToFavorSavingPower();
+        CHECK_CA_WARN("failed to set Saving Power Mode");
+        MP_VERBOSE(ao, "Set audio I/O buffer frame size to maximum.\n");
+    }else{
+        err = ca_set_frame_buffer_size(ao, p->device, &p->buffersize);
+        CHECK_CA_WARN("failed to set buffersize");
+    }
+
+    ca_print_asbd(ao, "Virtual format: ", &p->stream_asbd); 
 
     if (p->stream_asbd.mChannelsPerFrame > MP_NUM_CHANNELS) {
         MP_ERR(ao, "unsupported number of channels: %d > %d.\n",
@@ -347,7 +569,29 @@ static int init(struct ao *ao)
         goto coreaudio_error;
     }
 
-    int new_format = ca_asbd_to_mp_format(&p->stream_asbd);
+    int new_format;
+    AudioStreamBasicDescription asbd;
+
+    if (!integer_mode_packed_24_bit_device_hack(ao)){
+        ca_fill_asbd_packed_24_bit_device_hack(ao, &asbd);
+        MP_VERBOSE(ao, "ca_fill_asbd_packed_24_bit_device_hack\n");
+    }else{
+        ca_fill_asbd(ao, &asbd);
+        MP_VERBOSE(ao, "ca_fill_asbd\n");
+    }
+
+    if (!integer_mode_packed_24_bit_device_hack(ao) && (p->stream_asbd.mFormatFlags & kAudioFormatFlagIsNonMixable) && (asbd.mBitsPerChannel == 32)){
+        new_format = ca_asbd_to_mp_format_integer_mode_packed_24_device_hack(&p->stream_asbd);
+        MP_VERBOSE(ao, "Hacking %u-bit stream on packed 24-bit device in Integer Mode\n", asbd.mBitsPerChannel);
+    }else{
+        if (!integer_mode_unpacked_24_bit_device_hack(ao) && (p->stream_asbd.mFormatFlags & kAudioFormatFlagIsNonMixable) && (asbd.mBitsPerChannel == 32)){
+            new_format = ca_asbd_to_mp_format_integer_mode_hack(&p->stream_asbd);
+            MP_VERBOSE(ao, "Hacking %u-bit stream on 24-bit device in Integer Mode\n", asbd.mBitsPerChannel);
+        }else{
+            new_format = ca_asbd_to_mp_format(&p->stream_asbd);
+            MP_VERBOSE(ao, "No hacking.\n");
+        }
+    }
 
     // If both old and new formats are spdif, avoid changing it due to the
     // imperfect mapping between mp and CA formats.
@@ -385,7 +629,7 @@ static int init(struct ao *ao)
     }
 
     p->hw_latency_us = ca_get_device_latency_us(ao, p->device);
-    MP_VERBOSE(ao, "base latency: %d microseconds\n", (int)p->hw_latency_us);
+    MP_VERBOSE(ao, "Base latency: %d microseconds\n", (int)p->hw_latency_us);
 
     err = enable_property_listener(ao, true);
     CHECK_CA_ERROR("cannot install format change listener during init");
@@ -463,9 +707,15 @@ const struct ao_driver audio_out_coreaudio_exclusive = {
         .stream = 0,
         .stream_idx = -1,
         .changed_mixing = false,
+        .buffersize = 1024, // Default value is 512, increase to 1024 as per Apple's Suggestion (https://developer.apple.com/library/archive/technotes/tn2321/_index.html)
+        .IOCycleUsage = 1,
+        .integer_mode = 1,
     },
     .options = (const struct m_option[]){
         OPT_FLAG("spdif-hack", spdif_hack, 0),
+        OPT_INTRANGE("buffer-size", buffersize, 0, 1, 24576), // Not sure how to set min and max values which are retrieved from "OSStatus err2 = CA_GET_O(device, kAudioDevicePropertyBufferFrameSizeRange, &value_range);"
+        OPT_FLAG("integer-mode", integer_mode, 0),
+        OPT_FLOATRANGE("IOCycle-Usage", IOCycleUsage, 0, 0, 1),
         {0}
     },
     .options_prefix = "coreaudio",

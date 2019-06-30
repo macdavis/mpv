@@ -160,6 +160,8 @@ static int init(struct ao *ao)
     AudioStreamBasicDescription asbd;
     ca_fill_asbd(ao, &asbd);
 
+    SetAudioPowerHintToFavorSavingPower();
+
     if (!init_audiounit(ao, asbd))
         goto coreaudio_error;
 

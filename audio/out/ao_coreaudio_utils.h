@@ -55,12 +55,23 @@ OSStatus ca_select_device(struct ao *ao, char* name, AudioDeviceID *device);
 
 bool ca_formatid_is_compressed(uint32_t formatid);
 void ca_fill_asbd(struct ao *ao, AudioStreamBasicDescription *asbd);
+void ca_fill_asbd_packed_24_bit_device_hack(struct ao *ao, AudioStreamBasicDescription *asbd);
 void ca_print_asbd(struct ao *ao, const char *description,
                    const AudioStreamBasicDescription *asbd);
 bool ca_asbd_equals(const AudioStreamBasicDescription *a,
                     const AudioStreamBasicDescription *b);
+bool ca_asbd_equals_integer_mode_hack(const AudioStreamBasicDescription *a,
+                    const AudioStreamBasicDescription *b);
 int ca_asbd_to_mp_format(const AudioStreamBasicDescription *asbd);
+int ca_asbd_to_mp_format_integer_mode_hack(const AudioStreamBasicDescription *asbd);
+int ca_asbd_to_mp_format_integer_mode_packed_24_device_hack(const AudioStreamBasicDescription *asbd);
 bool ca_asbd_is_better(AudioStreamBasicDescription *req,
+                       AudioStreamBasicDescription *old,
+                       AudioStreamBasicDescription *new);
+bool ca_virtual_asbd_is_better(AudioStreamBasicDescription *req,
+                       AudioStreamBasicDescription *old,
+                       AudioStreamBasicDescription *new);
+bool ca_bluetooth_asbd_is_better(AudioStreamBasicDescription *req,
                        AudioStreamBasicDescription *old,
                        AudioStreamBasicDescription *new);
 
@@ -68,9 +79,16 @@ int64_t ca_frames_to_us(struct ao *ao, uint32_t frames);
 int64_t ca_get_latency(const AudioTimeStamp *ts);
 
 #if HAVE_COREAUDIO
+OSStatus ca_get_ao_volume(struct ao *ao, AudioDeviceID device, UInt32 channel);
+OSStatus SetAudioPowerHintToFavorSavingPower(void);
 bool ca_stream_supports_compressed(struct ao *ao, AudioStreamID stream);
 OSStatus ca_lock_device(AudioDeviceID device, pid_t *pid);
 OSStatus ca_unlock_device(AudioDeviceID device, pid_t *pid);
+OSStatus ca_get_frame_buffer_size(struct ao *ao, AudioDeviceID device, int *buffersize);
+OSStatus ca_set_frame_buffer_size(struct ao *ao, AudioDeviceID device, int *buffersize);
+OSStatus ca_IO_Cycle_Usage(struct ao *ao, AudioDeviceID device, Float32 *IOCycleUsage);
+OSStatus ca_get_Terminal_Type(struct ao *ao, AudioDeviceID device);
+OSStatus ca_get_Device_Transport_Type(struct ao *ao, AudioDeviceID device);
 OSStatus ca_disable_mixing(struct ao *ao, AudioDeviceID device, bool *changed);
 OSStatus ca_enable_mixing(struct ao *ao, AudioDeviceID device, bool changed);
 int64_t ca_get_device_latency_us(struct ao *ao, AudioDeviceID device);
