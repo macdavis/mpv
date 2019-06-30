@@ -177,7 +177,7 @@ static OSStatus property_listener_cb(
     AudioStreamBasicDescription f;
     OSErr err = CA_GET(p->stream, kAudioStreamPropertyVirtualFormat, &f);
     CHECK_CA_WARN("could not get stream format");
-    if (err != noErr || !ca_asbd_equals(&p->stream_asbd, &f)) {
+    if (err != noErr || !ca_asbd_equals(&p->stream_asbd, &f, 0)) {
         if (atomic_compare_exchange_strong(&p->reload_requested,
                                            &(bool){false}, true))
         {
@@ -264,11 +264,10 @@ static OSStatus render_cb_compressed(
     AudioStreamBasicDescription asbd;
 
     //if (!integer_mode_packed_24_bit_device_hack(ao))
-    ca_fill_asbd_packed_24_bit_device_hack(ao, &asbd); // Should make no difference which one to use,
-                                                       // as we only need mBitsPerChannel and mFormatFlags.
-                                                       // choose this for easier testing.
+    ca_fill_asbd(ao, &asbd, 1); // Should make no difference which one to use,
+                                    // as we only need mBitsPerChannel and mFormatFlags.
     //else
-    //ca_fill_asbd(ao, &asbd);
+    //ca_fill_asbd(ao, &asbd, 0);
 
     int pseudo_frames = requested / sstride;
 
@@ -376,10 +375,10 @@ static int find_best_format(struct ao *ao, AudioStreamBasicDescription *out_fmt)
     AudioStreamBasicDescription asbd;
 
     if (!integer_mode_packed_24_bit_device_hack(ao)){
-        ca_fill_asbd_packed_24_bit_device_hack(ao, &asbd);
+        ca_fill_asbd(ao, &asbd, 1);
         ca_print_asbd(ao, "Our format (hacked): ", &asbd);
     }else{
-        ca_fill_asbd(ao, &asbd);
+        ca_fill_asbd(ao, &asbd, 0);
         ca_print_asbd(ao, "Our format: ", &asbd);
     }
 
@@ -403,21 +402,21 @@ static int find_best_format(struct ao *ao, AudioStreamBasicDescription *out_fmt)
 
         if (err1 == noErr){
             if (TransportType == (kAudioDeviceTransportTypeBluetooth | kAudioDeviceTransportTypeBluetoothLE)){
-                if (!out_fmt->mFormatID || ca_bluetooth_asbd_is_better(&asbd, out_fmt, stream_asbd))
+                if (!out_fmt->mFormatID || ca_asbd_is_better(&asbd, out_fmt, stream_asbd, 0, 1))
                 *out_fmt = *stream_asbd;
             // For Build-In output, 32 Bit Virtual truncates to 16 Bit physical format will create background noise.
             // So let the physical format stays in 32 Bit.
             }else if (TransportType == kAudioDeviceTransportTypeBuiltIn & asbd.mBitsPerChannel == 16){
-                if (!out_fmt->mFormatID || ca_bluetooth_asbd_is_better(&asbd, out_fmt, stream_asbd))
+                if (!out_fmt->mFormatID || ca_asbd_is_better(&asbd, out_fmt, stream_asbd, 0, 1))
                 *out_fmt = *stream_asbd;
             }
         }
 
         if ((p->integer_mode) || (p->spdif_hack)) {
-            if (!out_fmt->mFormatID || ca_asbd_is_better(&asbd, out_fmt, stream_asbd))
+            if (!out_fmt->mFormatID || ca_asbd_is_better(&asbd, out_fmt, stream_asbd, 0, 0))
             *out_fmt = *stream_asbd;
         }else{
-            if (!out_fmt->mFormatID || ca_virtual_asbd_is_better(&asbd, out_fmt, stream_asbd))
+            if (!out_fmt->mFormatID || ca_asbd_is_better(&asbd, out_fmt, stream_asbd, 1, 0))
             *out_fmt = *stream_asbd;
         }
     }
@@ -521,7 +520,7 @@ static int init(struct ao *ao)
                     err = ca_get_frame_buffer_size(ao, p->device, &p->buffersize);
                     CHECK_CA_WARN("failed to get buffersize range");
                     err = SetAudioPowerHintToFavorSavingPower();
-                    MP_VERBOSE(ao, "Set audio I/O buffer frame size to maximum.\n");
+                    MP_VERBOSE(ao, "Set audio I/O buffer size to 4096, or device's max.\n");
                     CHECK_CA_WARN("failed to set Power Saving Mode");
             }
         }else{
@@ -542,21 +541,21 @@ static int init(struct ao *ao)
     AudioStreamBasicDescription asbd;
 
     if (!integer_mode_packed_24_bit_device_hack(ao)){
-        ca_fill_asbd_packed_24_bit_device_hack(ao, &asbd);
+        ca_fill_asbd(ao, &asbd, 1);
         MP_VERBOSE(ao,"ca_fill_asbd_packed_24_bit_device_hack\n");
     }else{
-        ca_fill_asbd(ao, &asbd);
+        ca_fill_asbd(ao, &asbd, 0);
     }
 
 
     if (!integer_mode_packed_24_bit_device_hack(ao) && (p->stream_asbd.mFormatFlags & kAudioFormatFlagIsNonMixable) && (asbd.mBitsPerChannel == 32)){
-        new_format = ca_asbd_to_mp_format_integer_mode_packed_24_device_hack(&p->stream_asbd);
+        new_format = ca_asbd_to_mp_format(&p->stream_asbd, 1, 1);
         MP_VERBOSE(ao, "Hacking %u-bit stream on packed 24-bit device in Integer Mode\n", asbd.mBitsPerChannel);
     }else if (!integer_mode_unpacked_24_bit_device_hack(ao) && (p->stream_asbd.mFormatFlags & kAudioFormatFlagIsNonMixable) && (asbd.mBitsPerChannel == 32)) {
-        new_format = ca_asbd_to_mp_format_integer_mode_unpacked_24_device_hack(&p->stream_asbd);
+        new_format = ca_asbd_to_mp_format(&p->stream_asbd, 1, 0);
         MP_VERBOSE(ao, "Hacking %u-bit stream on 24-bit device in Integer Mode\n", asbd.mBitsPerChannel);
     }else{
-        new_format = ca_asbd_to_mp_format(&p->stream_asbd);
+        new_format = ca_asbd_to_mp_format(&p->stream_asbd, 0, 0);
     }
 
     //if (!integer_mode_packed_24_bit_device_hack(ao) && (p->stream_asbd.mFormatFlags & kAudioFormatFlagIsNonMixable) && (asbd.mBitsPerChannel == 32)){
@@ -598,7 +597,7 @@ static int init(struct ao *ao)
         err = CA_GET(p->stream, kAudioStreamPropertyPhysicalFormat,
                      &physical_format);
         CHECK_CA_ERROR("could not get stream's physical format");
-        int ph_format = ca_asbd_to_mp_format(&physical_format);
+        int ph_format = ca_asbd_to_mp_format(&physical_format, 0, 0);
         if (ao->format != AF_FORMAT_FLOAT || ph_format != AF_FORMAT_S16) {
             MP_ERR(ao, "Wrong parameters for spdif hack (%d / %d)\n",
                    ao->format, ph_format);

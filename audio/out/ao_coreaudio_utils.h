@@ -54,27 +54,17 @@ OSStatus ca_select_device(struct ao *ao, char* name, AudioDeviceID *device);
 #endif
 
 bool ca_formatid_is_compressed(uint32_t formatid);
-void ca_fill_asbd(struct ao *ao, AudioStreamBasicDescription *asbd);
-void ca_fill_asbd_packed_24_bit_device_hack(struct ao *ao, AudioStreamBasicDescription *asbd);
+void ca_fill_asbd(struct ao *ao, AudioStreamBasicDescription *asbd, int packed_24_hack);
 void ca_print_asbd(struct ao *ao, const char *description,
                    const AudioStreamBasicDescription *asbd);
 bool ca_asbd_equals(const AudioStreamBasicDescription *a,
-                    const AudioStreamBasicDescription *b);
-bool ca_asbd_equals_integer_mode_hack(const AudioStreamBasicDescription *a,
-                    const AudioStreamBasicDescription *b);
-int ca_asbd_to_mp_format(const AudioStreamBasicDescription *asbd);
-int ca_asbd_to_mp_format_integer_mode_unpacked_24_device_hack(const AudioStreamBasicDescription *asbd);
-int ca_asbd_to_mp_format_integer_mode_packed_24_device_hack(const AudioStreamBasicDescription *asbd);
+                    const AudioStreamBasicDescription *b, int integer_mode_hack);
+int ca_asbd_to_mp_format(const AudioStreamBasicDescription *asbd, int integer_mode_hack, int packed_24_hack);
 bool ca_asbd_is_better(AudioStreamBasicDescription *req,
                        AudioStreamBasicDescription *old,
-                       AudioStreamBasicDescription *new);
-bool ca_virtual_asbd_is_better(AudioStreamBasicDescription *req,
-                       AudioStreamBasicDescription *old,
-                       AudioStreamBasicDescription *new);
-bool ca_bluetooth_asbd_is_better(AudioStreamBasicDescription *req,
-                       AudioStreamBasicDescription *old,
-                       AudioStreamBasicDescription *new);
-
+                       AudioStreamBasicDescription *new,
+                       int mixableflag,
+                       int bytesflag);
 int64_t ca_frames_to_us(struct ao *ao, uint32_t frames);
 int64_t ca_get_latency(const AudioTimeStamp *ts);
 

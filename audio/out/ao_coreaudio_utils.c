@@ -192,7 +192,7 @@ OSStatus ca_get_Terminal_Type(struct ao *ao, AudioDeviceID device)
     return ret;
 }
 
-// Another way to set largest CoreAudio Frame Buffer Size.
+// Another way to set largest CoreAudio Frame Buffer Size or 4096, whichever is smaller.
 // Reference: https://developer.apple.com/library/archive/technotes/tn2321/_index.html
 
 OSStatus SetAudioPowerHintToFavorSavingPower(void)
@@ -381,41 +381,7 @@ bool check_ca_st(struct ao *ao, int level, OSStatus code, const char *message)
 }
 
 static void ca_fill_asbd_raw(AudioStreamBasicDescription *asbd, int mp_format,
-                             int samplerate, int num_channels)
-{
-    asbd->mSampleRate       = samplerate;
-    // Set "AC3" for other spdif formats too - unknown if that works.
-    asbd->mFormatID         = af_fmt_is_spdif(mp_format) ?
-                              kAudioFormat60958AC3 :
-                              kAudioFormatLinearPCM;
-    asbd->mChannelsPerFrame = num_channels;
-    asbd->mBitsPerChannel   = af_fmt_to_bytes(mp_format) * 8;
-    asbd->mFormatFlags      = kAudioFormatFlagIsPacked;
-    asbd->mReserved         = 0;
-
-    int channels_per_buffer = num_channels;
-    if (af_fmt_is_planar(mp_format)) {
-        asbd->mFormatFlags |= kAudioFormatFlagIsNonInterleaved;
-        channels_per_buffer = 1;
-    }
-
-    if (af_fmt_is_float(mp_format)) {
-        asbd->mFormatFlags |= kAudioFormatFlagIsFloat;
-    } else if (!af_fmt_is_unsigned(mp_format)) {
-        asbd->mFormatFlags |= kAudioFormatFlagIsSignedInteger;
-    }
-
-    if (BYTE_ORDER == BIG_ENDIAN)
-        asbd->mFormatFlags |= kAudioFormatFlagIsBigEndian;
-
-    asbd->mFramesPerPacket = 1;
-    asbd->mBytesPerPacket = asbd->mBytesPerFrame =
-        asbd->mFramesPerPacket * channels_per_buffer *
-        (asbd->mBitsPerChannel / 8);
-}
-
-static void ca_fill_asbd_raw_packed_24_bit_device_hack(AudioStreamBasicDescription *asbd, int mp_format,
-                             int samplerate, int num_channels)
+                             int samplerate, int num_channels, int packed_24_hack)
 {
     asbd->mSampleRate       = samplerate;
     // Set "AC3" for other spdif formats too - unknown if that works.
@@ -444,23 +410,28 @@ static void ca_fill_asbd_raw_packed_24_bit_device_hack(AudioStreamBasicDescripti
 
     asbd->mFramesPerPacket = 1;
 
-    if ((asbd->mBitsPerChannel == 32) && (asbd->mFormatFlags & kAudioFormatFlagIsSignedInteger)){
-        asbd->mBytesPerPacket = asbd->mBytesPerFrame = 6;
+    if (packed_24_hack == 1){
+        if ((asbd->mBitsPerChannel == 32) && (asbd->mFormatFlags & kAudioFormatFlagIsSignedInteger)){
+            asbd->mBytesPerPacket = asbd->mBytesPerFrame = 6;
+        //}else{
+            //asbd->mBytesPerPacket = asbd->mBytesPerFrame =
+                //asbd->mFramesPerPacket * channels_per_buffer *
+                //(asbd->mBitsPerChannel / 8);
+        }
     }else{
         asbd->mBytesPerPacket = asbd->mBytesPerFrame =
-            asbd->mFramesPerPacket * channels_per_buffer *
-            (asbd->mBitsPerChannel / 8);
+        asbd->mFramesPerPacket * channels_per_buffer *
+        (asbd->mBitsPerChannel / 8);
     }
 }
 
-void ca_fill_asbd(struct ao *ao, AudioStreamBasicDescription *asbd)
+void ca_fill_asbd(struct ao *ao, AudioStreamBasicDescription *asbd, int packed_24_hack)
 {
-    ca_fill_asbd_raw(asbd, ao->format, ao->samplerate, ao->channels.num);
-}
-
-void ca_fill_asbd_packed_24_bit_device_hack(struct ao *ao, AudioStreamBasicDescription *asbd)
-{
-    ca_fill_asbd_raw_packed_24_bit_device_hack(asbd, ao->format, ao->samplerate, ao->channels.num);
+    if (packed_24_hack == 1){
+        ca_fill_asbd_raw(asbd, ao->format, ao->samplerate, ao->channels.num, 1);
+    }else{
+        ca_fill_asbd_raw(asbd, ao->format, ao->samplerate, ao->channels.num, 0);
+    }
 }
 
 bool ca_formatid_is_compressed(uint32_t formatid)
@@ -481,75 +452,60 @@ static uint32_t ca_normalize_formatid(uint32_t formatID)
 }
 
 bool ca_asbd_equals(const AudioStreamBasicDescription *a,
-                    const AudioStreamBasicDescription *b)
+                    const AudioStreamBasicDescription *b,
+                    int integer_mode_hack)
 {
     bool spdif = ca_formatid_is_compressed(a->mFormatID) &&
                  ca_formatid_is_compressed(b->mFormatID);
 
-    int flags = kAudioFormatFlagIsPacked | kAudioFormatFlagIsFloat |
-    kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsBigEndian;
+    if (integer_mode_hack == 1){
+        int flags = kAudioFormatFlagIsFloat |
+        kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsBigEndian;
 
-    return (a->mFormatFlags & flags) == (b->mFormatFlags & flags) &&
-          a->mBitsPerChannel == b->mBitsPerChannel &&
-          ca_normalize_formatid(a->mFormatID) ==
-          ca_normalize_formatid(b->mFormatID) &&
-          (spdif || a->mBytesPerPacket == b->mBytesPerPacket) &&
-          (spdif || a->mChannelsPerFrame == b->mChannelsPerFrame) &&
-          a->mSampleRate == b->mSampleRate;
+        return (a->mFormatFlags & flags) == (b->mFormatFlags & flags) &&
+              a->mBitsPerChannel >= b->mBitsPerChannel && //mpv doesn't have 24 bit integer format, only s32.
+              ca_normalize_formatid(a->mFormatID) ==
+              ca_normalize_formatid(b->mFormatID) &&
+              (spdif || a->mBytesPerPacket == b->mBytesPerPacket) &&
+              (spdif || a->mChannelsPerFrame == b->mChannelsPerFrame) &&
+              a->mSampleRate == b->mSampleRate;
+    }else{
+        int flags = kAudioFormatFlagIsPacked | kAudioFormatFlagIsFloat |
+        kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsBigEndian;
+
+        return (a->mFormatFlags & flags) == (b->mFormatFlags & flags) &&
+              a->mBitsPerChannel == b->mBitsPerChannel &&
+              ca_normalize_formatid(a->mFormatID) ==
+              ca_normalize_formatid(b->mFormatID) &&
+              (spdif || a->mBytesPerPacket == b->mBytesPerPacket) &&
+              (spdif || a->mChannelsPerFrame == b->mChannelsPerFrame) &&
+              a->mSampleRate == b->mSampleRate;
+    }
+
 }
-
-bool ca_asbd_equals_integer_mode_hack(const AudioStreamBasicDescription *a,
-                    const AudioStreamBasicDescription *b)
-{
-    bool spdif = ca_formatid_is_compressed(a->mFormatID) &&
-                 ca_formatid_is_compressed(b->mFormatID);
-    // Delete "kAudioFormatFlagIsPacked" for unpacked 24 bit devices.
-    int flags = kAudioFormatFlagIsFloat |
-    kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsBigEndian;
-
-    return (a->mFormatFlags & flags) == (b->mFormatFlags & flags) &&
-          a->mBitsPerChannel >= b->mBitsPerChannel && //mpv doesn't have 24 bit integer format, only s32.
-          ca_normalize_formatid(a->mFormatID) ==
-          ca_normalize_formatid(b->mFormatID) &&
-          (spdif || a->mBytesPerPacket == b->mBytesPerPacket) &&
-          (spdif || a->mChannelsPerFrame == b->mChannelsPerFrame) &&
-          a->mSampleRate == b->mSampleRate;
-}
-
 
 // Return the AF_FORMAT_* (AF_FORMAT_S16 etc.) corresponding to the asbd.
-int ca_asbd_to_mp_format(const AudioStreamBasicDescription *asbd)
+int ca_asbd_to_mp_format(const AudioStreamBasicDescription *asbd,
+                        int integer_mode_hack,
+                        int packed_24_hack)
 {
     for (int fmt = 1; fmt < AF_FORMAT_COUNT; fmt++) {
         AudioStreamBasicDescription mp_asbd = {0};
-        ca_fill_asbd_raw(&mp_asbd, fmt, asbd->mSampleRate, asbd->mChannelsPerFrame);
 
-        if (ca_asbd_equals(&mp_asbd, asbd))
+        if (packed_24_hack == 1){
+            ca_fill_asbd_raw(&mp_asbd, fmt, asbd->mSampleRate, asbd->mChannelsPerFrame, 1);
+        }else{
+            ca_fill_asbd_raw(&mp_asbd, fmt, asbd->mSampleRate, asbd->mChannelsPerFrame, 0);
+        }
+
+        if (integer_mode_hack == 1){
+            if (ca_asbd_equals(&mp_asbd, asbd, 1))
             return af_fmt_is_spdif(fmt) ? AF_FORMAT_S_AC3 : fmt;
-    }
-    return 0;
-}
-
-int ca_asbd_to_mp_format_integer_mode_unpacked_24_device_hack(const AudioStreamBasicDescription *asbd)
-{
-    for (int fmt = 1; fmt < AF_FORMAT_COUNT; fmt++) {
-        AudioStreamBasicDescription mp_asbd = {0};
-        ca_fill_asbd_raw(&mp_asbd, fmt, asbd->mSampleRate, asbd->mChannelsPerFrame);
-
-        if (ca_asbd_equals_integer_mode_hack(&mp_asbd, asbd))
+        }else{
+            if (ca_asbd_equals(&mp_asbd, asbd, 0))
             return af_fmt_is_spdif(fmt) ? AF_FORMAT_S_AC3 : fmt;
-    }
-    return 0;
-}
+        }
 
-int ca_asbd_to_mp_format_integer_mode_packed_24_device_hack(const AudioStreamBasicDescription *asbd)
-{
-    for (int fmt = 1; fmt < AF_FORMAT_COUNT; fmt++) {
-        AudioStreamBasicDescription mp_asbd = {0};
-        ca_fill_asbd_raw_packed_24_bit_device_hack(&mp_asbd, fmt, asbd->mSampleRate, asbd->mChannelsPerFrame);
-
-        if (ca_asbd_equals_integer_mode_hack(&mp_asbd, asbd))
-            return af_fmt_is_spdif(fmt) ? AF_FORMAT_S_AC3 : fmt;
     }
     return 0;
 }
@@ -560,7 +516,7 @@ void ca_print_asbd(struct ao *ao, const char *description,
     uint32_t flags  = asbd->mFormatFlags;
     uint32_t swap   = CFSwapInt32HostToBig(asbd->mFormatID);
     char *format    = mp_tag_str(swap);
-    int mpfmt       = ca_asbd_to_mp_format_integer_mode_unpacked_24_device_hack(asbd);
+    int mpfmt       = ca_asbd_to_mp_format(asbd, 1, 0);
     float SampleRate = asbd->mSampleRate / 1000;
     MP_VERBOSE(ao,
        "%s%s %" PRIu32 "/%g/%" PRIu32 "ch "
@@ -595,7 +551,9 @@ static bool value_is_better(double req, double old, double new)
 // Return whether new is an improvement over old (req is the requested format).
 bool ca_asbd_is_better(AudioStreamBasicDescription *req,
                        AudioStreamBasicDescription *old,
-                       AudioStreamBasicDescription *new)
+                       AudioStreamBasicDescription *new,
+                       int mixableflag,
+                       int bytesflag)
 {
     if (new->mChannelsPerFrame > MP_NUM_CHANNELS)
         return false;
@@ -606,84 +564,34 @@ bool ca_asbd_is_better(AudioStreamBasicDescription *req,
     if (req->mFormatID != old->mFormatID)
         return true;
 
-    if (!value_is_better(req->mBitsPerChannel, old->mBitsPerChannel,
-                         new->mBitsPerChannel))
-        return false;
-
-    if (!value_is_better(req->mSampleRate, old->mSampleRate, new->mSampleRate))
-        return false;
-
-    if (!value_is_better(req->mChannelsPerFrame, old->mChannelsPerFrame,
-                         new->mChannelsPerFrame))
-        return false;
-
-    return true;
-}
-
-
-bool ca_virtual_asbd_is_better(AudioStreamBasicDescription *req,
-                       AudioStreamBasicDescription *old,
-                       AudioStreamBasicDescription *new)
-{
-    if (new->mChannelsPerFrame > MP_NUM_CHANNELS)
-        return false;
-    if (old->mChannelsPerFrame > MP_NUM_CHANNELS)
-        return true;
-    if (req->mFormatID != new->mFormatID)
-        return false;
-    if (req->mFormatID != old->mFormatID)
-        return true;
-
-    if (!value_is_better(req->mBitsPerChannel, old->mBitsPerChannel,
-                         new->mBitsPerChannel))
-        return false;
-
-    if (!value_is_better(req->mSampleRate, old->mSampleRate, new->mSampleRate))
-        return false;
-
-    if (!value_is_better(req->mChannelsPerFrame, old->mChannelsPerFrame,
-                         new->mChannelsPerFrame))
-        return false;
-
-// Turn off Integer Mode.
-// Since "our format" is mixable, check mFormatFlags "kAudioFormatFlagIsNonMixable" will ensure physical format is also mixable.
-// In my system, W/O comparing mFormatFlags will make mpv choose unmixable format.
-// In this case, virtual format will automatically set to 32-bit mixable float point.
-
-    if ((req->mFormatFlags & kAudioFormatFlagIsNonMixable) != (new->mFormatFlags & kAudioFormatFlagIsNonMixable))
-        return false;
-    if ((req->mFormatFlags & kAudioFormatFlagIsNonMixable) != (old->mFormatFlags & kAudioFormatFlagIsNonMixable))
-        return true;
-
-    return true;
-}
-
-
-// My bluetooth device only have 2 physical formats. "8 (aligned high in 16 Bit)/8 1ch" and "32/48 2ch".
-// The virtual format of my bluetooth device is "32-bit float" only.
-// mpv mistakenly take "8 bit aligned high in 16 bit" as true s16.
-// Thus, we need to add another criteria, mBytesPerFrame > 3 (mBytesPerFrame of 8 bit is 2, while that of 16 bit is 4).
-    // In here, I deliberately set mBytesPerFrame > 5 because I found if not, for build-in device, the case of
-    // "32 bit float virtual formant and 16 bit physical format" will create truncation errors and increase the background noise.
-    // mBytesPerFrame > 5 simply means that even for true s16, the out physical format will be 32/24bit.
-// Just for test purpose here, the better solution might be separating this to two functions, one for Bluetooth and one for Build-in device.
-
-bool ca_bluetooth_asbd_is_better(AudioStreamBasicDescription *req,
-                       AudioStreamBasicDescription *old,
-                       AudioStreamBasicDescription *new)
-{
-    if (new->mChannelsPerFrame > MP_NUM_CHANNELS)
-        return false;
-    if (old->mChannelsPerFrame > MP_NUM_CHANNELS)
-        return true;
-    if (req->mFormatID != new->mFormatID)
-        return false;
-    if (req->mFormatID != old->mFormatID)
-        return true;
-
-    if (!value_is_better(5, old->mBytesPerFrame,
+    // My bluetooth device only have 2 physical formats. "8 (aligned high in 16 Bit)/8 1ch" and "32/48 2ch".
+    // The virtual format of my bluetooth device is "32-bit float" only.
+    // mpv mistakenly take "8 bit aligned high in 16 bit" as true s16.
+    // Thus, we need to add another criteria, mBytesPerFrame > 3 (mBytesPerFrame of 8 bit is 2, while that of 16 bit is 4).
+        // In here, I deliberately set mBytesPerFrame > 5 because I found if not, for build-in device, the case of
+        // "32 bit float virtual formant and 16 bit physical format" will create truncation errors and increase the background noise.
+        // mBytesPerFrame > 5 simply means that even for true s16, the out physical format will be 32/24bit.
+    // Just for test purpose here, the better solution might be separating this to two functions, one for Bluetooth and one for Build-in device.
+    if (bytesflag == 1){
+        if (!value_is_better(5, old->mBytesPerFrame,
                          new->mBytesPerFrame))
-        return false;
+            return false;
+    }else{
+        if (!value_is_better(req->mBitsPerChannel, old->mBitsPerChannel,
+                             new->mBitsPerChannel))
+            return false;
+    }
+
+    // Turn off Integer Mode.
+    // Since "our format" is mixable, check mFormatFlags "kAudioFormatFlagIsNonMixable" will ensure physical format is also mixable.
+    // In my system, W/O comparing mFormatFlags will make mpv choose unmixable format.
+    // In this case, virtual format will automatically set to 32-bit mixable float point.
+    if (mixableflag == 1){
+        if ((req->mFormatFlags & kAudioFormatFlagIsNonMixable) != (new->mFormatFlags & kAudioFormatFlagIsNonMixable))
+            return false;
+        if ((req->mFormatFlags & kAudioFormatFlagIsNonMixable) != (old->mFormatFlags & kAudioFormatFlagIsNonMixable))
+            return true;
+    }
 
     if (!value_is_better(req->mSampleRate, old->mSampleRate, new->mSampleRate))
         return false;
@@ -903,7 +811,7 @@ bool ca_change_physical_format_sync(struct ao *ao, AudioStreamID stream,
         if (!CHECK_CA_WARN("could not retrieve physical format"))
             break;
 
-        format_set = ca_asbd_equals(&change_format, &actual_format);
+        format_set = ca_asbd_equals(&change_format, &actual_format, 0);
         if (format_set)
             break;
 
