@@ -564,14 +564,16 @@ bool ca_asbd_is_better(AudioStreamBasicDescription *req,
     if (req->mFormatID != old->mFormatID)
         return true;
 
-    // My bluetooth device only have 2 physical formats. "8 (aligned high in 16 Bit)/8 1ch" and "32/48 2ch".
-    // The virtual format of my bluetooth device is "32-bit float" only.
-    // mpv mistakenly take "8 bit aligned high in 16 bit" as true s16.
-    // Thus, we need to add another criteria, mBytesPerFrame > 3 (mBytesPerFrame of 8 bit is 2, while that of 16 bit is 4).
-        // In here, I deliberately set mBytesPerFrame > 5 because I found if not, for build-in device, the case of
-        // "32 bit float virtual formant and 16 bit physical format" will create truncation errors and increase the background noise.
-        // mBytesPerFrame > 5 simply means that even for true s16, the out physical format will be 32/24bit.
-    // Just for test purpose here, the better solution might be separating this to two functions, one for Bluetooth and one for Build-in device.
+    // Set both virtual and physical format to 32 bit float.
+    // This is useful for a 32 bit device that doesn't support Integer Mode.
+    // Fix two issues.
+        // 1) Low quality playback in Bluetooth. Some Bluetooth device's 16 bit doesn't use full 16 bits.
+            // Instead, it's "8 bit (aligned high in 16 Bit)/8 kHz/1ch".
+            // Thus, adding another criteria. (mBytesPerFrame of 8 bit is 2, while that of 16 bit is 4).
+
+        // 2) "32 bit float virtual formant and 16 bit physical format"
+            // will create truncation errors and increase the background noise.
+            // mBytesPerFrame > 5 simply means that even for true s16, the out physical format will be 32 bit.
     if (bytesflag == 1){
         if (!value_is_better(5, old->mBytesPerFrame,
                          new->mBytesPerFrame))
