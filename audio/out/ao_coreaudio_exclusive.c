@@ -108,14 +108,16 @@ static int device_property(struct ao *ao)
     int aligned_high = 0;
     for (int j = 0; j < n_formats; j++) {
         AudioStreamBasicDescription *stream_asbd = &formats[j].mFormat;
-        if (stream_asbd->mBitsPerChannel > maxbitdepth_physical)
-            maxbitdepth_physical =stream_asbd->mBitsPerChannel;
-        if (stream_asbd->mFormatFlags & kAudioFormatFlagIsNonMixable)
-            integer_mode_avaliable = 1;
-        if (stream_asbd->mBytesPerPacket > max_mBytesPerPacket)
-            max_mBytesPerPacket = stream_asbd->mBytesPerPacket;
-        if (stream_asbd->mFormatFlags & kLinearPCMFormatFlagIsAlignedHigh)
-            aligned_high = 1;
+        if (stream_asbd->mFormatID == kAudioFormatLinearPCM){ // Exclude spdif format
+            if (stream_asbd->mBitsPerChannel > maxbitdepth_physical)
+                maxbitdepth_physical =stream_asbd->mBitsPerChannel;
+            if (stream_asbd->mFormatFlags & kAudioFormatFlagIsNonMixable)
+                integer_mode_avaliable = 1;
+            if (stream_asbd->mBytesPerPacket > max_mBytesPerPacket)
+                max_mBytesPerPacket = stream_asbd->mBytesPerPacket;
+            if (stream_asbd->mFormatFlags & kLinearPCMFormatFlagIsAlignedHigh)
+                aligned_high = 1;
+            }
         }
 
     int device_type = 0;
@@ -224,7 +226,7 @@ static OSStatus render_cb_compressed(
     int sstride;
 
     int device_type = device_property(ao);
-    if (device_type == 3){
+    if ((device_type == 3) && (ao->format == (AF_FORMAT_S32 | AF_FORMAT_S32P))){
         // Otherwise coreaudio doesn't get all the frames it expects, and plays at 0.75x normal speed/buzzes.
         sstride = p->spdif_hack ? 4 * ao->channels.num : 6;
         MP_VERBOSE(ao,"Hacking sstride\n");
@@ -346,13 +348,13 @@ static int find_best_format(struct ao *ao, AudioStreamBasicDescription *out_fmt)
     AudioStreamBasicDescription asbd;
 
     int device_type = device_property(ao);
-    if (device_type == 3){
-        ca_fill_asbd(ao, &asbd, 1);
-        ca_print_asbd(ao, "Our format (hacked): ", &asbd);
-    }else{
+    //if ((device_type == 3) && (p->integer_mode) && (asbd.mBitsPerChannel > 16)){
+        //ca_fill_asbd(ao, &asbd, 1);
+        //ca_print_asbd(ao, "Our format (hacked): ", &asbd);
+    //}else{
         ca_fill_asbd(ao, &asbd, 0);
         ca_print_asbd(ao, "Our format: ", &asbd);
-    }
+    //}
 
     *out_fmt = (AudioStreamBasicDescription){0};
     AudioStreamRangedDescription *formats;
