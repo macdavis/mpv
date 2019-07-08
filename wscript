@@ -418,7 +418,7 @@ iconv support use --disable-iconv.",
 ]
 
 ffmpeg_pkg_config_checks = [
-    'libavutil',     '>= 56.12.100',
+    'libavutil',     '>= 56.27.100',
     'libavcodec',    '>= 58.16.100',
     'libavformat',   '>= 58.9.100',
     'libswscale',    '>= 5.0.101',
@@ -826,6 +826,11 @@ video_output_features = [
         'desc':  'Vulkan context support',
         'deps': 'libplacebo',
         'func': check_pkg_config('vulkan'),
+    }, {
+        'name': 'vaapi-vulkan',
+        'desc': 'VAAPI Vulkan',
+        'deps': 'vaapi && vulkan',
+        'func': check_true,
     }, {
         'name': 'egl-helpers',
         'desc': 'EGL helper functions',
