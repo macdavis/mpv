@@ -16,7 +16,6 @@
  */
 
 #include <CoreAudio/HostTime.h>
-#include <libavutil/mathematics.h>
 
 #include "ao.h"
 #include "internal.h"
@@ -63,13 +62,13 @@ static int64_t ca_get_hardware_latency(struct ao *ao) {
             0,
             &audiounit_latency_sec,
             &size);
-    CHECK_CA_ERROR("cannot get audio unit latency");
+    CHECK_CA_ERROR("Cannot get audio unit latency");
 
     uint64_t audiounit_latency_ns = MP_TIME_S_TO_NS(audiounit_latency_sec);
     uint64_t device_latency_ns    = ca_get_device_latency_ns(ao, p->device);
 
-    MP_VERBOSE(ao, "audiounit latency [ns]: %lld\n", audiounit_latency_ns);
-    MP_VERBOSE(ao, "device latency [ns]: %lld\n", device_latency_ns);
+    MP_VERBOSE(ao, "Audiounit latency: %lld nanoseconds\n", audiounit_latency_ns);
+    MP_VERBOSE(ao, "Device latency: %lld nanoseconds\n", device_latency_ns);
 
     return audiounit_latency_ns + device_latency_ns;
 
@@ -102,7 +101,7 @@ static int get_volume(struct ao *ao, float *vol) {
         AudioUnitGetParameter(p->audio_unit, kHALOutputParam_Volume,
                               kAudioUnitScope_Global, 0, &auvol);
 
-    CHECK_CA_ERROR("could not get HAL output volume");
+    CHECK_CA_ERROR("Could not get HAL output volume");
     *vol = auvol * 100.0;
     return CONTROL_TRUE;
 coreaudio_error:
@@ -115,7 +114,7 @@ static int set_volume(struct ao *ao, float *vol) {
     OSStatus err =
         AudioUnitSetParameter(p->audio_unit, kHALOutputParam_Volume,
                               kAudioUnitScope_Global, 0, auvol, 0);
-    CHECK_CA_ERROR("could not set HAL output volume");
+    CHECK_CA_ERROR("Could not set HAL output volume");
     return CONTROL_TRUE;
 coreaudio_error:
     return CONTROL_ERROR;
@@ -142,7 +141,10 @@ static bool reinit_device(struct ao *ao) {
     struct priv *p = ao->priv;
 
     OSStatus err = ca_select_device(ao, ao->device, &p->device);
-    CHECK_CA_ERROR("failed to select device");
+    CHECK_CA_ERROR("Failed to select device");
+
+    ca_get_Device_Transport_Type_and_data_source(ao, p->device);
+    CHECK_CA_WARN("Failed to get device transport type");
 
     return true;
 
@@ -155,7 +157,7 @@ static int init(struct ao *ao)
     struct priv *p = ao->priv;
 
     if (!af_fmt_is_pcm(ao->format) || (ao->init_flags & AO_INIT_EXCLUSIVE)) {
-        MP_VERBOSE(ao, "redirecting to coreaudio_exclusive\n");
+        MP_VERBOSE(ao, "Redirecting to coreaudio_exclusive\n");
         ao->redirect = "coreaudio_exclusive";
         return CONTROL_ERROR;
     }
@@ -175,11 +177,12 @@ static int init(struct ao *ao)
     AudioStreamBasicDescription asbd;
     ca_fill_asbd(ao, &asbd);
 
+    SetAudioPowerHintToFavorSavingPower();
+
     if (!init_audiounit(ao, asbd))
         goto coreaudio_error;
 
     reinit_latency(ao);
-    ao->device_buffer = av_rescale(p->hw_latency_ns, ao->samplerate, 1000000000) * 2;
 
     p->queue = dispatch_queue_create("io.mpv.coreaudio_stop_during_idle",
                                      DISPATCH_QUEUE_SERIAL);
@@ -197,6 +200,8 @@ static void init_physical_format(struct ao *ao)
 
     void *tmp = talloc_new(NULL);
 
+    UInt32 val = 0;
+
     AudioStreamBasicDescription asbd;
     ca_fill_asbd(ao, &asbd);
 
@@ -205,29 +210,34 @@ static void init_physical_format(struct ao *ao)
 
     err = CA_GET_ARY_O(p->device, kAudioDevicePropertyStreams,
                        &streams, &n_streams);
-    CHECK_CA_ERROR("could not get number of streams");
+    CHECK_CA_ERROR("Could not get number of streams");
 
     talloc_steal(tmp, streams);
 
-    MP_VERBOSE(ao, "Found %zd substream(s).\n", n_streams);
+    MP_VERBOSE(ao, "Found %zd output substream(s)\n", n_streams);
 
     for (int i = 0; i < n_streams; i++) {
         AudioStreamRangedDescription *formats;
         size_t n_formats;
 
-        MP_VERBOSE(ao, "Looking at formats in substream %d...\n", i);
+        CA_GET_O(streams[i], kAudioStreamPropertyTerminalType, &val);
+        if (val == kAudioStreamTerminalTypeUnknown){
+            MP_VERBOSE(ao, "Looking at formats in output stream 0x%0X (terminal type: unknown) (%d/%zd)\n", *streams,i+1, n_streams);
+        }else{
+            MP_VERBOSE(ao, "Looking at formats in output stream 0x%0X (terminal type: %s) (%d/%zd)\n", *streams, mp_tag_str_hex(CFSwapInt32HostToBig(val)),i+1, n_streams);
+        }
 
         err = CA_GET_ARY(streams[i], kAudioStreamPropertyAvailablePhysicalFormats,
                          &formats, &n_formats);
 
-        if (!CHECK_CA_WARN("could not get number of stream formats"))
+        if (!CHECK_CA_WARN("Could not get number of stream formats"))
             continue; // try next one
 
         talloc_steal(tmp, formats);
 
         uint32_t direction;
         err = CA_GET(streams[i], kAudioStreamPropertyDirection, &direction);
-        CHECK_CA_ERROR("could not get stream direction");
+        CHECK_CA_ERROR("Could not get stream direction");
         if (direction != 0) {
             MP_VERBOSE(ao, "Not an output stream.\n");
             continue;
@@ -240,9 +250,19 @@ static void init_physical_format(struct ao *ao)
 
             ca_print_asbd(ao, "- ", stream_asbd);
 
-            if (!best_asbd.mFormatID || ca_asbd_is_better(&asbd, &best_asbd,
-                                                          stream_asbd))
-                best_asbd = *stream_asbd;
+            //UInt32 Transport_Type;
+            //CA_GET_O(p->device, kAudioDevicePropertyTransportType, &Transport_Type);
+            //CHECK_CA_WARN("failed to get device transport type");
+            //if (Transport_Type == (kAudioDeviceTransportTypeBluetooth | kAudioDeviceTransportTypeBluetoothLE)){
+                //if (!best_asbd.mFormatID || ca_asbd_is_better(&asbd, &best_asbd,
+                    //stream_asbd, 0, 1))
+                    //best_asbd = *stream_asbd;           
+            //}else{
+                if (!best_asbd.mFormatID || ca_asbd_is_better(&asbd, &best_asbd,
+                    stream_asbd, 0, 0))
+                    best_asbd = *stream_asbd;
+
+            //}
         }
 
         if (best_asbd.mFormatID) {
@@ -250,10 +270,10 @@ static void init_physical_format(struct ao *ao)
             err = CA_GET(p->original_asbd_stream,
                          kAudioStreamPropertyPhysicalFormat,
                          &p->original_asbd);
-            CHECK_CA_WARN("could not get current physical stream format");
+            CHECK_CA_WARN("Could not get current physical stream format");
 
-            if (ca_asbd_equals(&p->original_asbd, &best_asbd)) {
-                MP_VERBOSE(ao, "Requested format already set, not changing.\n");
+            if (ca_asbd_equals(&p->original_asbd, &best_asbd, 0)) {
+                MP_VERBOSE(ao, "Requested format already set, not changing\n");
                 p->original_asbd.mFormatID = 0;
                 break;
             }
@@ -287,16 +307,16 @@ static bool init_audiounit(struct ao *ao, AudioStreamBasicDescription asbd)
 
     AudioComponent comp = AudioComponentFindNext(NULL, &desc);
     if (comp == NULL) {
-        MP_ERR(ao, "unable to find audio component\n");
+        MP_ERR(ao, "Unable to find audio component\n");
         goto coreaudio_error;
     }
 
     err = AudioComponentInstanceNew(comp, &(p->audio_unit));
-    CHECK_CA_ERROR("unable to open audio component");
+    CHECK_CA_ERROR("Unable to open audio component");
 
     err = AudioUnitInitialize(p->audio_unit);
     CHECK_CA_ERROR_L(coreaudio_error_component,
-                     "unable to initialize audio unit");
+                     "Unable to initialize audio unit");
 
     size = sizeof(AudioStreamBasicDescription);
     err = AudioUnitSetProperty(p->audio_unit,
@@ -304,14 +324,14 @@ static bool init_audiounit(struct ao *ao, AudioStreamBasicDescription asbd)
                                kAudioUnitScope_Input, 0, &asbd, size);
 
     CHECK_CA_ERROR_L(coreaudio_error_audiounit,
-                     "unable to set the input format on the audio unit");
+                     "Unable to set the input format on the audio unit");
 
     err = AudioUnitSetProperty(p->audio_unit,
                                kAudioOutputUnitProperty_CurrentDevice,
                                kAudioUnitScope_Global, 0, &p->device,
                                sizeof(p->device));
     CHECK_CA_ERROR_L(coreaudio_error_audiounit,
-                     "can't link audio unit to selected device");
+                     "Can't link audio unit to selected device");
 
     AURenderCallbackStruct render_cb = (AURenderCallbackStruct) {
         .inputProc       = render_cb_lpcm,
@@ -324,7 +344,7 @@ static bool init_audiounit(struct ao *ao, AudioStreamBasicDescription asbd)
                                sizeof(AURenderCallbackStruct));
 
     CHECK_CA_ERROR_L(coreaudio_error_audiounit,
-                     "unable to set render callback on audio unit");
+                     "Unable to set render callback on audio unit");
 
     return true;
 
@@ -347,7 +367,7 @@ static void stop(struct ao *ao)
 {
     struct priv *p = ao->priv;
     OSStatus err = AudioOutputUnitStop(p->audio_unit);
-    CHECK_CA_WARN("can't stop audio unit");
+    CHECK_CA_WARN("Can't stop audio unit");
 }
 
 static void cancel_and_release_idle_work(struct priv *p)
@@ -380,7 +400,7 @@ static void _reset(void *_ao)
     struct ao *ao = (struct ao *)_ao;
     struct priv *p = ao->priv;
     OSStatus err = AudioUnitReset(p->audio_unit, kAudioUnitScope_Global, 0);
-    CHECK_CA_WARN("can't reset audio unit");
+    CHECK_CA_WARN("Can't reset audio unit");
 
     // Until the audio unit is stopped the macOS daemon coreaudiod continues to
     // consume CPU and prevent macOS from sleeping. Immediately stopping the
@@ -407,7 +427,7 @@ static void _start(void *_ao)
         dispatch_block_cancel(p->idle_work);
 
     OSStatus err = AudioOutputUnitStart(p->audio_unit);
-    CHECK_CA_WARN("can't start audio unit");
+    CHECK_CA_WARN("Can't start audio unit");
 }
 
 static void start(struct ao *ao)
@@ -434,7 +454,7 @@ static void uninit(struct ao *ao)
         OSStatus err = CA_SET(p->original_asbd_stream,
                               kAudioStreamPropertyPhysicalFormat,
                               &p->original_asbd);
-        CHECK_CA_WARN("could not restore physical stream format");
+        CHECK_CA_WARN("Could not restore physical stream format");
     }
 
     unregister_hotplug_cb(ao);
@@ -487,14 +507,14 @@ static bool register_hotplug_cb(struct ao *ao)
         AudioObjectPropertyAddress addr = {
             hotplug_properties[i],
             kAudioObjectPropertyScopeGlobal,
-            kAudioObjectPropertyElementMaster
+            kAudioObjectPropertyElementMain
         };
         err = AudioObjectAddPropertyListener(
             kAudioObjectSystemObject, &addr, hotplug_cb, (void *)ao);
         if (err != noErr) {
             char *c1 = mp_tag_str(hotplug_properties[i]);
             char *c2 = mp_tag_str(err);
-            MP_ERR(ao, "failed to set device listener %s (%s)", c1, c2);
+            MP_ERR(ao, "Failed to set device listener %s (%s)", c1, c2);
             goto coreaudio_error;
         }
     }
@@ -517,14 +537,14 @@ static void unregister_hotplug_cb(struct ao *ao)
         AudioObjectPropertyAddress addr = {
             hotplug_properties[i],
             kAudioObjectPropertyScopeGlobal,
-            kAudioObjectPropertyElementMaster
+            kAudioObjectPropertyElementMain
         };
         err = AudioObjectRemovePropertyListener(
             kAudioObjectSystemObject, &addr, hotplug_cb, (void *)ao);
         if (err != noErr) {
             char *c1 = mp_tag_str(hotplug_properties[i]);
             char *c2 = mp_tag_str(err);
-            MP_ERR(ao, "failed to set device listener %s (%s)", c1, c2);
+            MP_ERR(ao, "Failed to set device listener %s (%s)", c1, c2);
         }
     }
 }
