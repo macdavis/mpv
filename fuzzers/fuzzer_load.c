@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -41,7 +42,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 #endif
 
     // fmemopen doesn't have associated file descriptor, so we do copy.
-    int fd = memfd_create("fuzz_mpv_load", 0);
+    int fd = memfd_create("fuzz_mpv_load", MFD_CLOEXEC | MFD_ALLOW_SEALING);
     if (fd == -1)
         exit(1);
     ssize_t written = 0;
@@ -51,6 +52,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             exit(1);
         written += result;
     }
+    if (fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL) != 0)
+        exit(1);
     if (lseek(fd, 0, SEEK_SET) != 0)
         exit(1);
     char filename[5 + 10 + 1];
@@ -78,9 +81,12 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     check_error(mpv_command(ctx, cmd));
 
 #ifdef MPV_LOADFILE
+    bool loaded = false;
     while (1) {
-        mpv_event *event = mpv_wait_event(ctx, 10000);
-        if (event->event_id == MPV_EVENT_IDLE)
+        mpv_event *event = mpv_wait_event(ctx, -1);
+        if (event->event_id == MPV_EVENT_START_FILE)
+            loaded = true;
+        if (loaded && event->event_id == MPV_EVENT_IDLE)
             break;
     }
 #endif
