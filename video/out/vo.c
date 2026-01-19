@@ -70,8 +70,8 @@ extern const struct vo_driver video_out_kitty;
 static const struct vo_driver *const video_out_drivers[] =
 {
     // high-quality and well-supported VOs first:
-    &video_out_gpu,
     &video_out_gpu_next,
+    &video_out_gpu,
 
 #if HAVE_VDPAU
     &video_out_vdpau,
@@ -138,6 +138,7 @@ struct vo_internal {
     bool send_reset;                // send VOCTRL_RESET
     bool paused;
     bool visible;
+    bool wait_on_vo;
     bool wakeup_on_done;
     int queued_events;              // event mask for the user
     int internal_events;            // event mask for us
@@ -256,8 +257,6 @@ static void dealloc_vo(struct vo *vo)
 
     // These must be free'd before vo->in->dispatch.
     talloc_free(vo->opts_cache);
-    talloc_free(vo->gl_opts_cache);
-    talloc_free(vo->eq_opts_cache);
     mp_mutex_destroy(&vo->params_mutex);
 
     mp_mutex_destroy(&vo->in->lock);
@@ -307,9 +306,6 @@ static struct vo *vo_create(bool probing, struct mpv_global *global,
 
     m_config_cache_set_dispatch_change_cb(vo->opts_cache, vo->in->dispatch,
                                           update_opts, vo);
-
-    vo->gl_opts_cache = m_config_cache_alloc(NULL, global, &gl_video_conf);
-    vo->eq_opts_cache = m_config_cache_alloc(NULL, global, &mp_csp_equalizer_conf);
 
     mp_input_set_mouse_transform(vo->input_ctx, NULL, NULL);
     if (vo->driver->encode != !!vo->encode_lavc_ctx)
@@ -841,9 +837,7 @@ bool vo_is_ready_for_frame(struct vo *vo, int64_t next_pts)
 {
     struct vo_internal *in = vo->in;
     mp_mutex_lock(&in->lock);
-    bool blocked = vo->driver->initially_blocked &&
-                   !(in->internal_events & VO_EVENT_INITIAL_UNBLOCK);
-    bool r = vo->config_ok && !in->frame_queued && !blocked &&
+    bool r = vo->config_ok && !in->wait_on_vo && !in->frame_queued &&
              (!in->current_frame || in->current_frame->num_vsyncs < 1);
     if (r && next_pts >= 0) {
         // Don't show the frame too early - it would basically freeze the
@@ -902,6 +896,14 @@ void vo_wait_frame(struct vo *vo)
     mp_mutex_lock(&in->lock);
     while (in->frame_queued || in->rendering)
         mp_cond_wait(&in->wakeup, &in->lock);
+    mp_mutex_unlock(&in->lock);
+}
+
+void vo_wait_on_vo(struct vo *vo, bool wait)
+{
+    struct vo_internal *in = vo->in;
+    mp_mutex_lock(&in->lock);
+    in->wait_on_vo = wait;
     mp_mutex_unlock(&in->lock);
 }
 
@@ -1189,8 +1191,16 @@ static MP_THREAD_VOID vo_thread(void *ptr)
         if (send_pause)
             vo->driver->control(vo, vo_paused ? VOCTRL_PAUSE : VOCTRL_RESUME, NULL);
         if (wait_until > now && redraw) {
-            vo->driver->control(vo, VOCTRL_REDRAW, NULL);
-            do_redraw(vo); // now is a good time
+            // Allow manual redraws at most at display fps.
+            int64_t max_interval = in->vsync_interval > 1 ? in->vsync_interval : 0;
+            // Some windowing platforms break if we submit frames too fast.
+            if (vo->previous_redraw_time + max_interval <= now) {
+                vo->driver->control(vo, VOCTRL_REDRAW, NULL);
+                do_redraw(vo); // now is a good time
+                vo->previous_redraw_time = now;
+            } else {
+                wait_vo(vo, now + max_interval);
+            }
             continue;
         }
         if (vo->want_redraw) // might have been set by VOCTRLs
@@ -1415,6 +1425,11 @@ double vo_get_display_fps(struct vo *vo)
     double res = vo->in->display_fps;
     mp_mutex_unlock(&in->lock);
     return res;
+}
+
+void * vo_get_display_swapchain(struct vo *vo)
+{
+    return vo->display_swapchain;
 }
 
 // Set specific event flags, and wakeup the playback core if needed.

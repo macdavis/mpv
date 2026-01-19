@@ -33,6 +33,7 @@ local opts = {
     font_size = 24,
     border_size = 1.65,
     background_alpha = 80,
+    gap = 0.2,
     padding = 10,
     menu_outline_size = 0,
     menu_outline_color = "#FFFFFF",
@@ -47,8 +48,6 @@ local opts = {
     case_sensitive = false,
     history_dedup = true,
     font_hw_ratio = "auto",
-    selected_color = "",
-    selected_back_color = "",
 }
 
 local styles = {
@@ -90,7 +89,9 @@ local searching_history = false
 local history_paths = {}
 local histories_to_save = {}
 
+local MAX_LOG_LINES = 10000
 local log_buffers = {}
+local log_offset = 0
 local key_bindings = {}
 local dont_bind_up_down = false
 local global_margins = { t = 0, b = 0 }
@@ -113,6 +114,7 @@ local first_match_to_print = 1
 local default_item
 local item_positions = {}
 local max_item_width = 0
+local horizontal_offset = 0
 
 local complete
 local cycle_through_completions
@@ -202,7 +204,7 @@ end
 
 -- Functions to calculate the font width.
 local width_length_ratio = 0.5
-local osd_width, osd_height = 100, 100
+local osd_width, osd_height = 0, 0
 local text_osd = mp.create_osd_overlay("ass-events")
 text_osd.compute_bounds, text_osd.hidden = true, true
 
@@ -297,7 +299,11 @@ local function get_scaled_osd_dimensions()
 end
 
 local function get_line_height()
-    return selectable_items and opts.font_size * 1.1 or opts.font_size
+    if selectable_items then
+        return opts.font_size * (1 + opts.gap)
+    end
+
+    return opts.font_size
 end
 
 local function calculate_max_lines()
@@ -337,8 +343,10 @@ local function calculate_max_item_width()
                          (font and "\\fn" .. font or "") .. "\\q2}" ..
                          ass_escape(longest_item)
     local result = width_overlay:update()
-    max_item_width = math.min(result.x1 - result.x0,
-                              osd_w - get_margin_x() * 2 - opts.padding * 2)
+    if result.x0 then
+        max_item_width = math.min(result.x1 - result.x0,
+                                  osd_w - get_margin_x() * 2 - opts.padding * 2)
+    end
 end
 
 local function should_highlight_completion(i)
@@ -536,6 +544,11 @@ local function get_matches_to_print(terminal)
     local last_match_to_print  = math.min(first_match_to_print + max_lines - 1,
                                           #matches)
 
+    if last_match_to_print - first_match_to_print + 1 < math.min(max_lines, #matches) and
+       last_match_to_print >= math.min(max_lines, #matches) then
+        first_match_to_print = last_match_to_print - math.min(max_lines, #matches) + 1
+    end
+
     for i = first_match_to_print, last_match_to_print do
         local item = ""
         local end_highlight = terminal and terminal_styles.match_end or "{\\1c}"
@@ -704,7 +717,7 @@ local function render()
             (global_margins.t + (1 - global_margins.t - global_margins.b) / 2) -
             (math.min(#selectable_items, max_lines) + 1.5) * line_height / 2
         alignment = 7
-        clipping_coordinates = "0,0," .. x + max_item_width .. "," .. osd_h
+        clipping_coordinates = x .. ",0," .. x + max_item_width .. "," .. osd_h
     else
         x = get_margin_x()
         y = osd_h * (1 - global_margins.b) - get_margin_y()
@@ -747,7 +760,9 @@ local function render()
 
     local log_ass = ""
     local log_buffer = log_buffers[id] or {}
-    for i = #log_buffer - math.min(max_lines, #log_buffer) + 1, #log_buffer do
+    log_offset = math.max(math.min(log_offset, #log_buffer - max_lines), 0)
+    for i = #log_buffer - math.min(max_lines, #log_buffer) - log_offset + 1,
+            #log_buffer - log_offset do
         log_ass = log_ass .. style .. log_buffer[i].style ..
                   ass_escape(log_buffer[i].text) .. "\\N"
     end
@@ -784,7 +799,7 @@ local function render()
         ass:pos(x, y)
         ass:append("{\\1c&H" .. back_color .. "&\\1a&H" .. back_alpha ..
                    "&\\bord" .. opts.menu_outline_size .. "\\3c&H" ..
-                   color_option_to_ass(opts.menu_outline_color) .. "&}")
+                   color_option_to_ass(opts.menu_outline_color) .. "\\blur0&}")
         if border_style == "background-box" then
             ass:append("{\\4a&Hff&}")
         end
@@ -823,7 +838,7 @@ local function render()
 
         ass:new_event()
         ass:an(4)
-        ass:pos(x, item_y)
+        ass:pos(x - horizontal_offset, item_y)
         ass:append(style .. item)
 
         item_positions[#item_positions + 1] =
@@ -1031,6 +1046,16 @@ local function unbind_mouse()
     mp.remove_key_binding("_console_mbtn_left")
 end
 
+local function after_cur_matches_completion()
+    local token = line:sub(completion_pos)
+
+    for _, completion in pairs(completion_buffer) do
+        if completion == token:sub(1, #completion) then
+            return true
+        end
+    end
+end
+
 -- Run the current command or select the current item
 local function submit()
     if searching_history then
@@ -1049,7 +1074,8 @@ local function submit()
                         utils.format_json({matches[focused_match].index}))
         end
     else
-        if selected_completion_index == 0 and autoselect_completion then
+        if selected_completion_index == 0 and autoselect_completion
+           and not after_cur_matches_completion() then
             cycle_through_completions()
         end
 
@@ -1186,6 +1212,11 @@ local function move_history(amount, is_wheel)
     render()
 end
 
+local function horizontal_scroll(amount)
+    horizontal_offset = math.max(horizontal_offset + amount, 0)
+    render()
+end
+
 -- Go to the first command in the command history (PgUp)
 local function handle_pgup()
     if selectable_items then
@@ -1215,6 +1246,7 @@ local function search_history()
 
     searching_history = true
     selectable_items = {}
+    horizontal_offset = 0
 
     for i = 1, #history do
         selectable_items[i] = history[#history + 1 - i]
@@ -1314,16 +1346,20 @@ local function clear_log_buffer()
     render()
 end
 
+local function scroll_log(amount)
+    if selectable_items then
+        return
+    end
+
+    log_offset = log_offset + amount
+    render()
+end
+
 -- Returns a string of UTF-8 text from the clipboard (or the primary selection)
 local function get_clipboard(clip)
     if platform == "x11" then
-        local res = utils.subprocess({
-            args = { "xclip", "-selection", clip and "clipboard" or "primary", "-out" },
-            playback_only = false,
-        })
-        if not res.error then
-            return res.stdout
-        end
+        local property = clip and "clipboard/text" or "clipboard/text-primary"
+        return mp.get_property(property, "")
     elseif platform == "wayland" then
         if mp.get_property("current-clipboard-backend") == "wayland" then
             local property = clip and "clipboard/text" or "clipboard/text-primary"
@@ -1355,6 +1391,21 @@ local function paste(clip)
     line = before_cur .. text .. after_cur
     cursor = cursor + text:len()
     handle_edit()
+end
+
+local function copy()
+    if not selectable_items then
+        mp.set_property("clipboard/text", line)
+        mp.msg.info("Input line copied")
+    elseif matches[1] then
+        mp.set_property("clipboard/text", matches[focused_match].text)
+
+        if terminal_output() then
+            mp.msg.info("Item copied")
+        else
+            mp.osd_message("Item copied")
+        end
+    end
 end
 
 local function text_input(info)
@@ -1464,8 +1515,16 @@ local function get_bindings()
         { "down",        function() move_history(1) end         },
         { "ctrl+n",      function() move_history(1) end         },
         { "wheel_down",  function() move_history(1, true) end   },
+        { "shift+up",    function() scroll_log(1)  end          },
+        { "shift+down",  function() scroll_log(-1) end          },
         { "wheel_left",  function() end                         },
         { "wheel_right", function() end                         },
+        { "shift+left",  function() horizontal_scroll(-25) end  },
+        { "shift+right", function() horizontal_scroll( 25) end  },
+        { "wheel_left",  function() horizontal_scroll(-25) end  },
+        { "wheel_right", function() horizontal_scroll( 25) end  },
+        { "shift+wheel_up",   function() horizontal_scroll(-25) end },
+        { "shift+wheel_down", function() horizontal_scroll( 25) end },
         { "ctrl+left",   prev_word                              },
         { "alt+b",       prev_word                              },
         { "ctrl+right",  next_word                              },
@@ -1485,6 +1544,7 @@ local function get_bindings()
         { "ctrl+k",      del_to_eol                             },
         { "ctrl+l",      clear_log_buffer                       },
         { "ctrl+u",      del_to_start                           },
+        { "ctrl+y",      copy,                                  },
         { "ctrl+v",      function() paste(true) end             },
         { "meta+v",      function() paste(true) end             },
         { "ctrl+bs",     del_word                               },
@@ -1621,13 +1681,21 @@ mp.register_script_message("get-input", function (script_name, args)
 
     if args.items then
         selectable_items = {}
+        horizontal_offset = 0
 
         -- Limit the number of characters to prevent libass from freezing mpv.
         -- Not important for terminal output.
-        local limit = terminal_output() and 5000 or (5 * osd_width / opts.font_size)
+        local limit
+        if osd_width == 0 or terminal_output() then
+            limit = 5000
+        else
+            limit = 5 * osd_width / opts.font_size
+        end
 
         for i, item in ipairs(args.items) do
-            selectable_items[i] = item:gsub("[\r\n].*", "⋯"):sub(1, limit)
+            local last = next_utf8(item, limit) - 1
+            selectable_items[i] = item:gsub("[\r\n].*", "…"):sub(1, last) ..
+                                  (last < #item and "…" or "")
         end
 
         calculate_max_item_width()
@@ -1637,6 +1705,7 @@ mp.register_script_message("get-input", function (script_name, args)
         selectable_items = nil
         unbind_mouse()
         id = args.id or script_name .. prompt
+        log_offset = 0
         completion_buffer = {}
         autoselect_completion = args.autoselect_completion
 
@@ -1659,7 +1728,7 @@ mp.register_script_message("get-input", function (script_name, args)
     mp.commandv("script-message-to", input_caller, "input-event", "opened")
 end)
 
--- Add a line to the log buffer (which is limited to 100 lines)
+-- Add a line to the log buffer
 mp.register_script_message("log", function (message)
     local log_buffer = log_buffers[id]
     message = utils.parse_json(message)
@@ -1671,12 +1740,16 @@ mp.register_script_message("log", function (message)
                          message.terminal_style or "",
     }
 
-    if #log_buffer > 100 then
+    if #log_buffer > MAX_LOG_LINES then
         table.remove(log_buffer, 1)
     end
 
     if not open then
         return
+    end
+
+    if log_offset > 0 then
+        log_offset = log_offset + 1
     end
 
     if not update_timer:is_enabled() then
@@ -1786,15 +1859,5 @@ mp.register_script_message("type", function (...)
 end)
 
 require "mp.options".read_options(opts, nil, render)
-
-if opts.selected_color ~= "" then
-    opts.focused_color = opts.selected_color
-    mp.msg.warn("selected_color has been replaced by focused_color")
-end
-
-if opts.selected_back_color ~= "" then
-    opts.focused_back_color = opts.selected_back_color
-    mp.msg.warn("selected_back_color has been replaced by focused_back_color")
-end
 
 collectgarbage()

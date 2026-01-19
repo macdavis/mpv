@@ -95,16 +95,22 @@ struct vo_wayland_state {
     struct wp_color_management_surface_feedback_v1 *color_surface_feedback;
     struct wp_image_description_creator_icc_v1 *icc_creator;
     struct mp_image_params target_params;
-    bool supports_icc;
+    bool image_description_processed;
     bool supports_parametric;
-    bool supports_primaries;
-    bool supports_tf_power;
-    bool supports_luminances;
     bool supports_display_primaries;
     int primaries_map[PL_COLOR_PRIM_COUNT];
     int transfer_map[PL_COLOR_TRC_COUNT];
     void *icc_file;
     uint32_t icc_size;
+    struct pl_color_space preferred_csp;
+    bool image_description_info_done;
+
+    /* color-representation */
+    struct wp_color_representation_manager_v1 *color_representation_manager;
+    struct wp_color_representation_surface_v1 *color_representation_surface;
+    int alpha_map[PL_ALPHA_MODE_COUNT];
+    int coefficients_map[PL_COLOR_SYSTEM_COUNT];
+    int range_map[PL_COLOR_SYSTEM_COUNT * 2];
 
     /* content-type */
     struct wp_content_type_manager_v1 *content_type_manager;
@@ -172,6 +178,7 @@ struct vo_wayland_state {
     /* Input */
     struct wl_list seat_list;
     struct xkb_context *xkb_context;
+    struct zwp_tablet_manager_v2 *wp_tablet_manager;
 
     /* Data offer */
     struct wl_data_device_manager *devman;
@@ -187,6 +194,7 @@ struct vo_wayland_state {
 };
 
 bool vo_wayland_check_visible(struct vo *vo);
+struct pl_color_space vo_wayland_preferred_csp(struct vo *vo);
 bool vo_wayland_valid_format(struct vo_wayland_state *wl, uint32_t drm_format, uint64_t modifier);
 bool vo_wayland_init(struct vo *vo);
 bool vo_wayland_reconfig(struct vo *vo);

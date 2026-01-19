@@ -38,6 +38,7 @@
 #include "video/mp_image.h"
 #include "dec_sub.h"
 #include "ass_mp.h"
+#include "packer.h"
 #include "sd.h"
 
 struct sd_ass_priv {
@@ -51,7 +52,7 @@ struct sd_ass_priv {
     struct sd_filter **filters;
     int num_filters;
     bool clear_once;
-    struct mp_ass_packer *packer;
+    struct mp_sub_packer *packer;
     struct sub_bitmap_copy_cache *copy_cache;
     bstr last_text;
     struct mp_image_params video_params;
@@ -76,7 +77,7 @@ const struct m_sub_options mp_sub_filter_opts = {
     .opts = (const struct m_option[]){
         {"sdh", OPT_BOOL(sub_filter_SDH)},
         {"sdh-harder", OPT_BOOL(sub_filter_SDH_harder)},
-        {"sdh-enclosures", OPT_STRING(sub_filter_SDH_enclosures)},
+        {"sdh-enclosures", OPT_STRINGLIST(sub_filter_SDH_enclosures)},
         {"regex-enable", OPT_BOOL(rf_enable)},
         {"regex-plain", OPT_BOOL(rf_plain)},
         {"regex", OPT_STRINGLIST(rf_items)},
@@ -86,7 +87,12 @@ const struct m_sub_options mp_sub_filter_opts = {
     },
     .size = sizeof(OPT_BASE_STRUCT),
     .defaults = &(OPT_BASE_STRUCT){
-        .sub_filter_SDH_enclosures = "([\uFF08",
+        .sub_filter_SDH_enclosures = (char *[]) {
+            "()",
+            "[]",
+            "\uFF08\uFF09",
+            NULL
+        },
         .rf_enable = true,
     },
     .change_flags = UPDATE_SUB_FILT,
@@ -314,7 +320,7 @@ static int init(struct sd *sd)
     assobjects_init(sd);
     filters_init(sd);
 
-    ctx->packer = mp_ass_packer_alloc(ctx);
+    ctx->packer = mp_sub_packer_alloc(ctx);
 
     // Subtitles does not have any profile value, so put the converted type as a profile.
     const char *_Atomic *desc = ctx->converter ? &sd->codec->codec_profile : &sd->codec->codec_desc;
@@ -665,8 +671,8 @@ static long long find_timestamp(struct sd *sd, double pts)
 
     // Try to fix small gaps and overlaps.
     ASS_Track *track = priv->ass_track;
-    int threshold = SUB_GAP_THRESHOLD * 1000;
-    int keep = SUB_GAP_KEEP * 1000;
+    int threshold = sd->opts->sub_fix_timing_threshold;
+    int keep = sd->opts->sub_fix_timing_keep;
 
     // Find the "current" event.
     ASS_Event *ev[2] = {0};
@@ -773,7 +779,7 @@ static struct sub_bitmaps *get_bitmaps(struct sd *sd, struct mp_osd_res dim,
 
     int changed;
     ASS_Image *imgs = ass_render_frame(renderer, track, ts, &changed);
-    mp_ass_packer_pack(ctx->packer, &imgs, 1, changed, !converted, format, res);
+    mp_sub_packer_pack_ass(ctx->packer, &imgs, 1, changed, !converted, format, res);
 
 done:
     // mangle_colors() modifies the color field, so copy the thing _before_.

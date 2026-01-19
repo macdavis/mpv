@@ -97,6 +97,7 @@ enum track_flags {
     TRACK_VISUAL_IMPAIRED = 1 << 3,
     TRACK_ATTACHED_PICTURE = 1 << 4,
     TRACK_FORCED = 1 << 5,
+    TRACK_DEFAULT = 1 << 6,
 };
 
 #define VS_IS_DISP(x) ((x) == VS_DISP_RESAMPLE ||       \
@@ -141,7 +142,7 @@ uint32_t mp_round_next_power_of_2(uint32_t v);
 int mp_lcm(int x, int y);
 
 int mp_snprintf_cat(char *str, size_t size, const char *format, ...)
-    PRINTF_ATTRIBUTE(3, 4);
+    MP_PRINTF_ATTRIBUTE(3, 4);
 
 struct bstr;
 
@@ -167,7 +168,7 @@ char *mp_tag_str_buf_hex(char *buf, size_t buf_size, uint32_t tag);
 #define mp_tprintf(SIZE, format, ...) \
     mp_tprintf_buf((char[SIZE]){0}, (SIZE), (format), __VA_ARGS__)
 char *mp_tprintf_buf(char *buf, size_t buf_size, const char *format, ...)
-    PRINTF_ATTRIBUTE(3, 4);
+    MP_PRINTF_ATTRIBUTE(3, 4);
 
 char **mp_dup_str_array(void *tctx, char **s);
 

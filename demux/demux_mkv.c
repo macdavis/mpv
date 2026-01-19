@@ -129,6 +129,8 @@ typedef struct mkv_track {
 
     int default_track;
     int forced_track;
+    int visual_impaired_track;
+    int hearing_impaired_track;
 
     unsigned char *private_data;
     unsigned int private_size;
@@ -746,7 +748,7 @@ static void parse_trackvideo(struct demuxer *demuxer, struct mkv_track *track,
         MP_DBG(demuxer, "|   + Colorspace: %#"PRIx32"\n", track->colorspace);
     }
     if (video->n_stereo_mode) {
-        const char *name = MP_STEREO3D_NAME(video->stereo_mode);
+        const char *name = MP_STEREO3D_NAME_DEF(video->stereo_mode, NULL);
         if (name) {
             track->stereo_mode = video->stereo_mode;
             MP_DBG(demuxer, "|   + StereoMode: %s\n", name);
@@ -950,6 +952,16 @@ static void parse_trackentry(struct demuxer *demuxer,
     if (entry->n_flag_forced) {
         track->forced_track = entry->flag_forced;
         MP_DBG(demuxer, "|  + Forced flag: %d\n", track->forced_track);
+    }
+
+    if (entry->n_flag_visual_impaired) {
+        track->visual_impaired_track = entry->flag_visual_impaired;
+        MP_DBG(demuxer, "|  + Visual-Impaired flag: %d\n", track->visual_impaired_track);
+    }
+
+    if (entry->n_flag_hearing_impaired) {
+        track->hearing_impaired_track = entry->flag_hearing_impaired;
+        MP_DBG(demuxer, "|  + Hearing-Impaired flag: %d\n", track->hearing_impaired_track);
     }
 
     if (entry->n_default_duration) {
@@ -1538,6 +1550,8 @@ static void init_track(demuxer_t *demuxer, mkv_track_t *track,
     sh->title = track->name;
     sh->default_track = track->default_track;
     sh->forced_track = track->forced_track;
+    sh->visual_impaired_track = track->visual_impaired_track;
+    sh->hearing_impaired_track = track->hearing_impaired_track;
 }
 
 static int demux_mkv_open_video(demuxer_t *demuxer, mkv_track_t *track);

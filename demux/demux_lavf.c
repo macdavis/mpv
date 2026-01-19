@@ -94,7 +94,9 @@ const struct m_sub_options demux_lavf_conf = {
         {"demuxer-lavf-probescore", OPT_INT(probescore),
          M_RANGE(1, AVPROBE_SCORE_MAX)},
         {"demuxer-lavf-hacks", OPT_BOOL(hacks)},
+#ifndef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
         {"demuxer-lavf-o", OPT_KEYVALUELIST(avopts)},
+#endif
         {"sub-codepage", OPT_STRING(sub_cp)},
         {"rtsp-transport", OPT_CHOICE(rtsp_transport,
             {"lavf", 0},
@@ -203,9 +205,6 @@ static const struct format_hack format_hacks[] = {
 
     // Useless non-sense, sometimes breaks MLP2 subreader.c fallback
     BLACKLIST("tty"),
-    // Let's open files with extremely generic extensions (.bin) with a
-    // demuxer that doesn't have a probe function! NO.
-    BLACKLIST("bin"),
     // Useless, does not work with custom streams.
     BLACKLIST("image2"),
     {0}

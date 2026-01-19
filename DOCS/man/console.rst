@@ -81,6 +81,12 @@ PGDN
 Ctrl+r
     Search the command history. See `SELECT`_ for the key bindings in this mode.
 
+Shift+UP
+    Scroll the log one line up.
+
+Shift+DOWN
+    Scroll the log one line down.
+
 INSERT
     Toggle insert mode.
 
@@ -89,6 +95,9 @@ Ctrl+v
 
 Shift+INSERT
     Paste text (uses the primary selection on X11 and Wayland).
+
+Ctrl+y
+    Copy the current line to the clipboard.
 
 TAB and Ctrl+i
     Cycle through completions.
@@ -147,6 +156,11 @@ Configurable Options
 
     The transparency of the menu's background. Ranges from 0 (opaque) to 255
     (fully transparent).
+
+``gap``
+    Default: 0.2
+
+    The gap between menu items, specified as a percentage the font size.
 
 ``padding``
     Default: 10

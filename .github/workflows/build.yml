@@ -29,6 +29,10 @@ on:
       - 'README.md'
       - 'RELEASE_NOTES'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   mingw:
     runs-on: ubuntu-24.04
@@ -36,16 +40,18 @@ jobs:
       CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 500M
+      TARGET: ${{ matrix.arch }}-w64-mingw32
+      RUST_TARGET: ${{ matrix.arch }}-pc-windows-gnu
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: i686-w64-mingw32
+          - arch: i686
             wine: wine32
-          - target: x86_64-w64-mingw32
+          - arch: x86_64
             wine: wine64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Get time
         id: get_time
@@ -55,32 +61,31 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ${{ matrix.target }}-${{ steps.get_time.outputs.timestamp }}
-          restore-keys: ${{ matrix.target }}-
+          key: ${{ env.TARGET }}-${{ steps.get_time.outputs.timestamp }}
+          restore-keys: ${{ env.TARGET }}-
 
       - name: Install dependencies
         run: |
+          rustup target add ${{ env.RUST_TARGET }}
           sudo dpkg --add-architecture i386
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y ccache g++-mingw-w64 gcc-multilib meson nasm ninja-build pkgconf ${{ matrix.wine }} wine
+          sudo apt-get install --no-install-recommends -y ccache g++-mingw-w64 gcc-multilib python3-pip nasm ninja-build pkgconf ${{ matrix.wine }} wine
+          python -m pip install meson
 
       - name: Install Meson Wraps
         run: |
           mkdir subprojects -p
           meson wrap install mujs
+          meson subprojects download
 
       - name: Build libraries
         run: |
           ./ci/build-mingw64.sh
-        env:
-          TARGET: ${{ matrix.target }}
 
       - name: Build with meson
         id: build
         run: |
           ./ci/build-mingw64.sh meson pack
-        env:
-          TARGET: ${{ matrix.target }}
 
       - name: Print meson log
         if: ${{ failure() && steps.build.outcome == 'failure' }}
@@ -103,17 +108,25 @@ jobs:
         run: |
           cat ./mingw_build/meson-logs/testlog.txt
 
-      - uses: actions/upload-artifact@v4
+      - name: Artifact name
+        id: artifact
+        run: |
+          VERSION_FILE=$(find . -path "*/common/version.h" -type f | head -n 1)
+          VER=$(grep VERSION "$VERSION_FILE" | cut -d'"' -f2)
+          PR=${{ github.event.pull_request.number && format('-pr{0}', github.event.pull_request.number) || '' }}
+          echo "name=mpv-$VER$PR-${{ github.run_id }}-$TARGET" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v5
         with:
-          name: mpv-${{ matrix.target }}
-          path: mpv-git-*.zip
+          name: ${{ steps.artifact.outputs.name }}
+          path: artifact/*
 
       - name: Save Cache
         uses: actions/cache/save@v4
         if: always()
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ${{ matrix.target }}-${{ steps.get_time.outputs.timestamp }}
+          key: ${{ env.TARGET }}-${{ steps.get_time.outputs.timestamp }}
 
   win32:
     runs-on: ${{ matrix.os }}
@@ -131,8 +144,9 @@ jobs:
       VS: "C:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise"
       CC: "ccache clang"
       CXX: "ccache clang++"
-      CC_LD: "lld"
-      CXX_LD: "lld"
+      CC_LD: "lld-link"
+      CXX_LD: "lld-link"
+      RUST_LD: "lld-link"
       WINDRES: "llvm-rc"
       CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_DIR: "${{ github.workspace }}\\.ccache"
@@ -143,7 +157,7 @@ jobs:
           git config --global core.autocrlf false
           git config --global core.eol lf
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Get time
         id: get_time
@@ -159,8 +173,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install meson
+          python -m pip install meson==1.9.2
           choco install ccache nasm
+          # For cargo -C
+          rustup default nightly
+          ./ci/install-cmake.ps1 -arch ${{ matrix.arch }}
 
       - name: Update Meson WrapDB
         run: |
@@ -177,7 +194,7 @@ jobs:
           $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -ne 'C:\Program Files\LLVM\bin' -and `
                                                              $_ -ne 'C:\Program Files\CMake\bin' -and `
                                                              $_ -ne 'C:\Strawberry\c\bin' }) -join ';'
-          $env:PATH += ';C:\Program Files\NASM'
+          $env:PATH = "$pwd\cmake\bin;" + $env:PATH + ';C:\Program Files\NASM'
           Import-Module "$env:VS\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $env:VS -SkipAutomaticLocation -DevCmdArguments "-arch=${{ matrix.arch }} -host_arch=${{ matrix.arch }}"
           ./ci/build-win32.ps1
@@ -193,7 +210,7 @@ jobs:
           $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -ne 'C:\Program Files\LLVM\bin' -and `
                                                              $_ -ne 'C:\Program Files\CMake\bin' -and `
                                                              $_ -ne 'C:\Strawberry\c\bin' }) -join ';'
-          $env:PATH += ';C:\Program Files\NASM'
+          $env:PATH = "$pwd\cmake\bin;" + $env:PATH + ';C:\Program Files\NASM'
           Import-Module "$env:VS\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $env:VS -SkipAutomaticLocation -DevCmdArguments "-arch=${{ matrix.arch }} -host_arch=${{ matrix.arch }}"
           meson test -C build -t 2
@@ -203,13 +220,30 @@ jobs:
         run: |
           cat ./build/meson-logs/testlog.txt
 
-      - uses: actions/upload-artifact@v4
+      - name: Artifact name
+        id: artifact
+        run: |
+          $VERSION_FILE = gci . -r -Filter "version.h" | ? { $_.FullName -match "[/\\]common[/\\]version\.h$" } | select -First 1 -exp FullName
+          $VER = (sls $VERSION_FILE -Pattern 'VERSION').Line -replace '.*"([^"]+)".*', '$1'
+          $PR = if ("${{ github.event.pull_request.number }}") { "-pr${{ github.event.pull_request.number }}" } else { "" }
+          $name = "mpv-$VER$PR-${{ github.run_id }}-${{ matrix.target }}"
+          "name=$name" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v5
         with:
-          name: mpv-${{ matrix.target }}
+          name: ${{ steps.artifact.outputs.name }}
           path: |
             build/mpv.???
+            build/mpv-*.bat
             build/vulkan-*.dll
             !build/mpv.lib
+            !build/mpv.pdb
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ${{ steps.artifact.outputs.name }}-pdb
+          path: |
+            build/mpv.pdb
 
       - name: Save Cache
         uses: actions/cache/save@v4
@@ -222,24 +256,21 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        cc:
-          - "clang"
-        cxx:
-          - "clang++"
-        os:
-          - "macos-13"
-          - "macos-14"
-          - "macos-15"
         include:
-          - os: "macos-13"
-            arch: "intel"
           - os: "macos-14"
             arch: "arm"
-            xcode: "Xcode_15.2"
+            xcode: "Xcode_15.0"
           - os: "macos-15"
             arch: "arm"
+          - os: "macos-15-intel"
+          - os: "macos-26"
+            arch: "arm"
+          - os: "macos-26"
+            arch: "test"
+            swift: "-target arm64-apple-macosx10.15"
+            target: "10.15"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Remove stray upstream python binary symlinks under /usr/local
         run: |
@@ -257,20 +288,28 @@ jobs:
 
       - name: Install dependencies
         run: |
-          brew update
+          if [[ -n "${{ matrix.homebrew }}" ]]; then
+            export HOMEBREW_NO_AUTO_UPDATE=1
+            cd "$(brew --repo homebrew/core)"
+            git checkout --force ${{ matrix.homebrew }}
+          else
+            brew update
+          fi
           brew install -q autoconf automake pkgconf libtool python freetype fribidi little-cms2 \
-            luajit libass ffmpeg meson uchardet mujs libplacebo molten-vk vulkan-loader vulkan-headers
+            luajit libass ffmpeg meson rust uchardet mujs libplacebo molten-vk vulkan-loader vulkan-headers \
+            libarchive libbluray libcaca libcdio-paranoia libdvdnav rubberband zimg
 
       - name: Build with meson
         id: build
         run: |
           ./ci/build-macos.sh
         env:
-          CC: "${{ matrix.cc }}"
-          CXX: "${{ matrix.cxx }}"
           TRAVIS_OS_NAME: "${{ matrix.os }}"
+          SWIFT_FLAGS: "${{ matrix.swift }}"
+          MACOSX_DEPLOYMENT_TARGET: "${{ matrix.target }}"
 
       - name: Create App Bundle
+        if: ${{ matrix.arch != 'test' }}
         run: |
           meson compile -C build macos-bundle
           tar -czvf mpv.tar.gz -C build mpv.app
@@ -290,9 +329,19 @@ jobs:
         run: |
           cat ./build/meson-logs/testlog.txt
 
-      - uses: actions/upload-artifact@v4
+      - name: Artifact name
+        id: artifact
+        run: |
+          VERSION_FILE=$(find . -path "*/common/version.h" -type f | head -n 1)
+          VER=$(grep VERSION "$VERSION_FILE" | cut -d'"' -f2)
+          TARGET=${{ matrix.os }}${{ matrix.arch != '' && format('-{0}', matrix.arch) || '' }}
+          PR=${{ github.event.pull_request.number && format('-pr{0}', github.event.pull_request.number) || '' }}
+          echo "name=mpv-$VER$PR-${{ github.run_id }}-$TARGET" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v5
+        if: ${{ matrix.arch != 'test' }}
         with:
-          name: mpv-${{ matrix.os }}-${{ matrix.arch }}
+          name: ${{ steps.artifact.outputs.name }}
           path: mpv.tar.gz
 
   linux:
@@ -315,7 +364,7 @@ jobs:
             ld: "lld"
             args: "-Db_lto=true -Db_lto_mode=thin"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Build with meson
         id: build
@@ -330,7 +379,6 @@ jobs:
       - name: Run meson tests
         id: tests
         run: |
-          export LSAN_OPTIONS="suppressions=${GITHUB_WORKSPACE}/.lsan_suppressions"
           meson test -C build
 
       - name: Print meson test log
@@ -346,14 +394,13 @@ jobs:
         CC: "clang"
         CXX: "clang++"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Build with meson
         id: build
         run: |
           meson setup build \
             --werror        \
-            -Dc_args="-Wno-error=deprecated -Wno-error=deprecated-declarations" \
             -Dfuzzers=true -Dlibmpv=true -Dcplayer=false
           meson compile -C build fuzzers
 
@@ -365,12 +412,12 @@ jobs:
   linux-ffmpeg-6-1:
     runs-on: ubuntu-latest
     container:
-      # We want to test ffmpeg 6.1.1 which alpine 3.19 has exactly.
-      # Furthermore, this is a very minimal build of mpv without commonly
-      # used features to test build compatibility. Musl is a nice bonus as well
-      image: alpine:3.19
+      # We want to test ffmpeg 6.1.2, which Alpine 3.21 includes.
+      # Also test compatibility with Wayland Protocols 1.38 and Wayland libs 1.23.
+      # Musl support is an added bonus.
+      image: alpine:3.21
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install dependencies
         run: |
           apk update
@@ -383,6 +430,7 @@ jobs:
               libass-dev \
               lua5.2-dev \
               pulseaudio-dev \
+              libplacebo-dev \
               libx11-dev \
               libxfixes-dev \
               libxkbcommon-dev \
@@ -391,7 +439,10 @@ jobs:
               libxscrnsaver-dev \
               meson \
               musl-dev \
-              samurai
+              rust \
+              samurai \
+              wayland-dev \
+              wayland-protocols
 
       - name: Build with meson
         id: build
@@ -415,14 +466,14 @@ jobs:
 
   openbsd:
     runs-on: ubuntu-latest # until https://github.com/actions/runner/issues/385
-    timeout-minutes: 30 # avoid any weirdness with the VM
+    timeout-minutes: 15 # avoid any weirdness with the VM
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Test in OpenBSD VM
-      uses: cross-platform-actions/action@v0.28.0
+      uses: cross-platform-actions/action@v0.30.0
       with:
         operating_system: openbsd
-        version: '7.7'
+        version: '7.8'
         run: |
             sudo pkg_add -U \
                 cmake \
@@ -444,6 +495,7 @@ jobs:
                 pulseaudio \
                 python3 \
                 rubberband \
+                rust \
                 sdl2 \
                 shaderc \
                 spirv-cross \
@@ -460,14 +512,14 @@ jobs:
 
   freebsd:
     runs-on: ubuntu-latest # until https://github.com/actions/runner/issues/385
-    timeout-minutes: 30 # avoid any weirdness with the VM
+    timeout-minutes: 15 # avoid any weirdness with the VM
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Test in FreeBSD VM
-      uses: cross-platform-actions/action@v0.28.0
+      uses: cross-platform-actions/action@v0.30.0
       with:
         operating_system: freebsd
-        version: '14.2'
+        version: '14.3'
         run: |
             sudo pkg update
             sudo pkg install -y \
@@ -487,7 +539,7 @@ jobs:
                 libplacebo \
                 libXinerama \
                 libxkbcommon \
-                libxpresent \
+                libXpresent \
                 libXv \
                 luajit \
                 meson \
@@ -498,6 +550,7 @@ jobs:
                 pulseaudio \
                 python3 \
                 rubberband \
+                rust \
                 sekrit-twc-zimg \
                 sdl2 \
                 sndio \
@@ -519,6 +572,16 @@ jobs:
         include:
           - sys: "clang64"
             os: "windows-latest"
+            auto-var-init: "uninitialized"
+          - sys: "clang64"
+            os: "windows-latest"
+            asan: true
+          - sys: "clang64"
+            os: "windows-latest"
+            auto-var-init: "zero"
+          - sys: "clang64"
+            os: "windows-latest"
+            auto-var-init: "pattern"
           - sys: "mingw64"
             os: "windows-latest"
           - sys: "ucrt64"
@@ -534,13 +597,14 @@ jobs:
         run: |
           git config --global core.autocrlf false
           git config --global core.eol lf
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: msys2/setup-msys2@v2
         with:
           msystem: ${{ matrix.sys }}
           update: true
           install: git
           pacboy: >-
+            amf-headers:p
             angleproject:p
             ca-certificates:p
             cc:p
@@ -560,6 +624,7 @@ jobs:
             python:p
             rst2pdf:p
             rubberband:p
+            rust:p
             shaderc:p
             spirv-cross:p
             uchardet:p
@@ -572,6 +637,8 @@ jobs:
           ./ci/build-msys2.sh meson
         env:
           SYS: ${{ matrix.sys }}
+          ASAN: ${{ matrix.asan }}
+          AUTO_VAR_INIT: ${{ matrix.auto-var-init }}
 
       - name: Print meson log
         if: ${{ failure() && steps.build.outcome == 'failure' }}

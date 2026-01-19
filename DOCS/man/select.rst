@@ -28,6 +28,15 @@ PGUP and Ctrl+b
 PGDN and Ctrl+f
     Scroll down one page.
 
+Shift+LEFT
+    Scroll left.
+
+Shift+RIGHT
+    Scroll right.
+
+Ctrl+y
+    Copy the focused item to the clipboard.
+
 MBTN_LEFT
     Select the item under the cursor, or close the console if clicking outside
     of the menu rectangle.
@@ -37,6 +46,12 @@ WHEEL_UP
 
 WHEEL_DOWN
     Scroll down.
+
+WHEEL_LEFT and Shift+WHEEL_DOWN
+    Scroll left.
+
+WHEEL_RIGHT and Shift+WHEEL_UP
+    Scroll right.
 
 Typing printable characters does a fuzzy search of the presented items.
 
@@ -123,6 +138,17 @@ Available script bindings are:
     List the names and values of all properties. You can also select one to
     print its value on the OSD, which is useful for long values that get
     clipped.
+
+``edit-config-file``
+    Open ``mpv.conf`` in the system text editor, creating it if it doesn't
+    already exist.
+
+``edit-input-conf``
+    Open ``input.conf`` in the system text editor, creating it if it doesn't
+    already exist.
+
+``open-docs``
+    Open mpv's online documentation in the browser.
 
 ``menu``
     Show a menu with miscellaneous entries.
