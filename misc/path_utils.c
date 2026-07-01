@@ -39,22 +39,29 @@
 #include <pathcch.h>
 #endif
 
-char *mp_basename(const char *path)
+bstr mp_basename_bstr(bstr path)
 {
-    char *s;
+    int separator_pos;
 
 #if HAVE_DOS_PATHS
-    if (!mp_is_url(bstr0(path))) {
-        s = strrchr(path, '\\');
-        if (s)
-            path = s + 1;
-        s = strrchr(path, ':');
-        if (s)
-            path = s + 1;
+    if (!mp_is_url(path)) {
+        separator_pos = bstrrchr(path, '\\');
+        if (separator_pos >= 0)
+            path = bstr_splice(path, separator_pos + 1, path.len);
+        separator_pos = bstrrchr(path, ':');
+        if (separator_pos >= 0)
+            path = bstr_splice(path, separator_pos + 1, path.len);
     }
 #endif
-    s = strrchr(path, '/');
-    return s ? s + 1 : (char *)path;
+    separator_pos = bstrrchr(path, '/');
+    if (separator_pos < 0)
+        return path;
+    return bstr_splice(path, separator_pos + 1, path.len);
+}
+
+const char *mp_basename(const char *path)
+{
+    return mp_basename_bstr(bstr0(path)).start;
 }
 
 struct bstr mp_dirname(const char *path)
@@ -82,16 +89,37 @@ void mp_path_strip_trailing_separator(char *path)
         path[len - 1] = '\0';
 }
 
-char *mp_splitext(const char *path, bstr *root)
+/* Return the file extension, excluding the '.'. If root is not NULL, set it to
+ * the part of the path without extension. So: path == root + "." + extension
+ * Return NULL if there is no file extension and don't set *root in this case.
+ */
+static bstr split_ext(bstr path, bstr *root)
 {
-    mp_assert(path);
-    int skip = (*path == '.'); // skip leading dot for "hidden" unix files
-    const char *split = strrchr(path + skip, '.');
-    if (!split || !split[1] || strchr(split, '/'))
-        return NULL;
+    bstr basename = mp_basename_bstr(path);
+
+    // Skip all leading dots, not just for "hidden" unix files, otherwise we
+    // end up splitting a part of the filename sans leading dot.
+    basename = bstr_splice(basename, bstrspn(basename, "."), basename.len);
+
+    int dot_pos = bstrrchr(basename, '.');
+    if (dot_pos < 0 || dot_pos == basename.len - 1)
+        return (bstr){0};
+    bstr ext = bstr_splice(basename, dot_pos + 1, basename.len);
     if (root)
-        *root = (bstr){(char *)path, split - path};
-    return (char *)split + 1;
+        *root = (bstr){path.start, ext.start - 1 - path.start};
+    return ext;
+}
+
+bstr mp_strip_ext(bstr path)
+{
+    bstr root = {0};
+    split_ext(path, &root);
+    return root.len ? root : path;
+}
+
+bstr mp_get_ext(bstr path)
+{
+    return split_ext(path, NULL);
 }
 
 bool mp_path_is_absolute(struct bstr path)

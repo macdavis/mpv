@@ -115,6 +115,16 @@ paths = executable('paths', 'paths.c', include_directories: incdir,
                    objects: paths_objects, link_with: test_utils)
 test('paths', paths)
 
+if features['libcurl']
+    avio_crypto_objects = libmpv.extract_objects('demux/avio_crypto.c')
+    avio_crypto = executable('avio-crypto', files('avio_crypto.c'),
+                             include_directories: incdir,
+                             dependencies: [libavformat, libavutil],
+                             objects: avio_crypto_objects,
+                             link_with: test_utils)
+    test('avio-crypto', avio_crypto)
+endif
+
 if get_option('libmpv')
     file = join_paths(source_root, 'etc', 'mpv-icon-8bit-16x16.png')
 
@@ -158,7 +168,9 @@ endif
 
 # Supported libavutil versions that work with these tests.
 # Will need to be manually updated when ffmpeg adds/removes more formats in the future.
-if libavutil.version().version_compare('>= 59.0.100') and libavutil.version().version_compare('<= 59.39.100')
+if libavutil.version().version_compare('>= 60.8.100') and libavutil.version().version_compare('< 61.0.100')
+    refdir = join_paths(source_root, 'test', 'ref', 'ffmpeg8')
+elif libavutil.version().version_compare('>= 59.0.100') and libavutil.version().version_compare('< 60.0.100')
     refdir = join_paths(source_root, 'test', 'ref', 'ffmpeg7')
 elif libavutil.version().version_compare('>= 58.27.100') and libavutil.version().version_compare('< 59.0.100')
     refdir = join_paths(source_root, 'test', 'ref', 'ffmpeg6')
