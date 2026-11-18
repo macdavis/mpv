@@ -36,6 +36,7 @@
 #endif
 
 #if HAVE_COREAUDIO || HAVE_AVFOUNDATION
+
 static bool ca_is_output_device(struct ao *ao, AudioDeviceID dev)
 {
     size_t n_buffers;
@@ -55,7 +56,7 @@ void ca_get_device_list(struct ao *ao, struct ao_device_list *list)
     OSStatus err =
         CA_GET_ARY(kAudioObjectSystemObject, kAudioHardwarePropertyDevices,
                    &devs, &n_devs);
-    CHECK_CA_ERROR("Failed to get list of output devices.");
+    CHECK_CA_ERROR("Failed to get list of output devices");
     for (int i = 0; i < n_devs; i++) {
         if (!ca_is_output_device(ao, devs[i]))
             continue;
@@ -64,7 +65,7 @@ void ca_get_device_list(struct ao *ao, struct ao_device_list *list)
         char *desc;
         err = CA_GET_STR(devs[i], kAudioDevicePropertyDeviceUID, &name);
         if (err != noErr) {
-            MP_VERBOSE(ao, "skipping device %d, which has no UID\n", i);
+            MP_VERBOSE(ao, "Skipping device %d, which has no UID\n", i);
             talloc_free(ta_ctx);
             continue;
         }
@@ -79,6 +80,245 @@ void ca_get_device_list(struct ao *ao, struct ao_device_list *list)
     talloc_free(devs);
 coreaudio_error:
     return;
+}
+
+OSStatus ca_get_frame_buffer_size(struct ao *ao, AudioDeviceID device)
+{
+    AudioValueRange value_range = {0, 0};
+    UInt32 VariableBufferFrameSizes;
+
+    OSStatus err = CA_GET_O(device, kAudioDevicePropertyBufferFrameSizeRange, &value_range);
+    OSStatus err1 = CA_GET_O(device, kAudioDevicePropertyUsesVariableBufferFrameSizes, &VariableBufferFrameSizes);
+
+    if (VariableBufferFrameSizes != 0){
+        MP_VERBOSE(ao, "Device I/O buffer size range: %g - %g frames (variable size: %u)\n", 
+            value_range.mMinimum, value_range.mMaximum, VariableBufferFrameSizes);
+    }else{
+        MP_VERBOSE(ao, "Device I/O buffer size range: %g - %g frames (variable size: N/A)\n", 
+            value_range.mMinimum, value_range.mMaximum);
+    }
+    return err & err1;
+
+}
+
+OSStatus ca_get_Device_Transport_Type_and_data_source(struct ao *ao, AudioDeviceID device)
+{
+    UInt32 Transport_Type;
+    OSStatus err = CA_GET_O(device, kAudioDevicePropertyTransportType, &Transport_Type);
+
+    UInt32 SourceID;
+    OSStatus err1 = CA_GET_O(device, kAudioDevicePropertyDataSource, &SourceID);
+
+    if (err == noErr){
+        if (Transport_Type == kAudioDeviceTransportTypeUnknown){
+                MP_VERBOSE(ao, "Device transport type: unknown\n");
+        }else{
+            // "kAudioDevicePropertyDataSource" only works for limited Transport Type,
+            // e.g. not work for USB or Bluetooth connection.
+            if (err1 == noErr){
+                AudioObjectPropertyAddress nameAddr;
+                nameAddr.mSelector = kAudioDevicePropertyDataSourceNameForIDCFString;
+                nameAddr.mScope = kAudioObjectPropertyScopeOutput;
+                nameAddr.mElement = kAudioObjectPropertyElementMain;
+
+                CFStringRef value = NULL;
+
+                AudioValueTranslation audioValueTranslation;
+                audioValueTranslation.mInputDataSize = sizeof(UInt32);
+                audioValueTranslation.mOutputData = (void *) &value;
+                audioValueTranslation.mOutputDataSize = sizeof(char *);
+                audioValueTranslation.mInputData = (void *) &SourceID;
+
+                UInt32 propsize = sizeof(AudioValueTranslation);
+
+                AudioObjectGetPropertyData(device, &nameAddr, 0, NULL, &propsize, &audioValueTranslation);
+
+                char *myCString = cfstr_get_cstr(value);
+
+                MP_VERBOSE(ao, "Device transport type: %s (source: %s)\n",
+                    mp_tag_str(CFSwapInt32HostToBig(Transport_Type)), myCString);
+            }else{
+                MP_VERBOSE(ao, "Device transport type: %s (source: Default)\n", mp_tag_str(CFSwapInt32HostToBig(Transport_Type)));
+            }
+        }
+    }
+    return err;
+}
+
+OSStatus ca_set_frame_buffer_size(struct ao *ao, AudioDeviceID device, int *buffersize)
+{
+    // Reference: https://github.com/cmus/cmus/blob/master/op/coreaudio.c
+    AudioValueRange value_range = {0, 0};
+    UInt32 VariableBufferFrameSizes;
+    int buffersize_original;
+    OSStatus err1 = CA_GET_O(device, kAudioDevicePropertyBufferFrameSizeRange, &value_range);
+    CA_GET_O(device, kAudioDevicePropertyUsesVariableBufferFrameSizes, &VariableBufferFrameSizes);
+
+    if (VariableBufferFrameSizes != 0){
+        MP_VERBOSE(ao, "Device I/O buffer size range: %g - %g frames (variable size: %u)\n", 
+            value_range.mMinimum, value_range.mMaximum, VariableBufferFrameSizes);
+    }else{
+        MP_VERBOSE(ao, "Device I/O buffer size range: %g - %g frames (variable size: N/A)\n", 
+            value_range.mMinimum, value_range.mMaximum);
+    }
+
+    OSStatus err = CA_SET(device, kAudioDevicePropertyBufferFrameSize, buffersize);
+    // e.g. 16 bit SPDIF AC-3 has a static buffer size of 1536 frames.
+    if (value_range.mMinimum == value_range.mMaximum){
+        *buffersize = value_range.mMinimum;
+        MP_VERBOSE(ao, "I/O buffer size is %d frames\n", *buffersize);
+    }else{
+        if ((*buffersize >= value_range.mMinimum) && (*buffersize <= value_range.mMaximum)){
+            MP_VERBOSE(ao, "Set I/O buffer size to %d frames\n", *buffersize);
+        }else if (*buffersize < value_range.mMinimum){
+            buffersize_original = *buffersize;
+            *buffersize = value_range.mMinimum;
+            MP_VERBOSE(ao, "Target I/O buffer size (%d frames) is invalid, increase to %d frames\n", buffersize_original, *buffersize);
+        }else{
+            buffersize_original = *buffersize;
+            *buffersize = value_range.mMaximum;
+            MP_VERBOSE(ao, "Target I/O buffer size (%d frames) is invalid, reduce to %d frames\n", buffersize_original, *buffersize);
+        }
+    }
+    return err & err1;
+}
+
+OSStatus ca_get_Terminal_Type(struct ao *ao, AudioDeviceID device)
+{
+    if (!device)
+    return 0;
+
+    UInt32 val = 0;
+    UInt32 size = sizeof(UInt32);
+
+    AudioObjectPropertyAddress propertyAddress;
+    propertyAddress.mScope    = kAudioObjectPropertyScopeGlobal;
+    propertyAddress.mElement  = kAudioObjectPropertyElementMain;
+    propertyAddress.mSelector = kAudioStreamPropertyTerminalType;
+
+    OSStatus ret = AudioObjectGetPropertyData(device, &propertyAddress, 0, NULL, &size, &val);
+
+    if (ret == noErr) {
+        if (val == kAudioStreamTerminalTypeUnknown){
+            MP_VERBOSE(ao, "Stream terminal type: unknown\n");
+        }else{
+            MP_VERBOSE(ao, "Stream terminal type: %s\n", mp_tag_str_hex(CFSwapInt32HostToBig(val)));
+        }
+
+    }
+    return ret;
+}
+
+// Another way to set largest CoreAudio Frame Buffer Size or 4096, whichever is smaller.
+OSStatus SetAudioPowerHintToFavorSavingPower(void)
+{
+    AudioObjectPropertyAddress theAddress = { kAudioHardwarePropertyPowerHint,
+                                              kAudioObjectPropertyScopeGlobal,
+                                              kAudioObjectPropertyElementMain};
+    UInt32 thePowerHint = kAudioHardwarePowerHintFavorSavingPower;
+    return AudioObjectSetPropertyData(kAudioObjectSystemObject, &theAddress, 0, NULL, sizeof(UInt32), &thePowerHint);
+}
+
+OSStatus ca_IO_Cycle_Usage(struct ao *ao, AudioDeviceID device, Float32 *IOCycleUsage)
+{
+   OSStatus err = CA_SET(device, kAudioDevicePropertyIOCycleUsage, IOCycleUsage);
+   MP_VERBOSE(ao, "Set device I/O Cycle Usage to %g\n", *IOCycleUsage);
+   return err;
+}
+
+// In exclusive Mode, once audio is played, there is no way to check the current volume.
+// Use this to display volume, mute and balance.
+// For audiophiles, it is important to keep at 0dB in the digial region.
+OSStatus ca_get_ao_volume(struct ao *ao, AudioDeviceID device, UInt32 channel)
+{
+    if (!device)
+    return 0;
+
+    Float32 volume;
+    Float32 volumedb;
+
+    int channelmute;
+    int submute;
+
+    UInt32 dataSize = sizeof(volume);
+    Float32 VirtualMasterBalance;
+    Float32 VirtualMasterVolume;
+    Float32 SubVolumeScalar;
+    Float32 SubVolumeDecibels;
+    int mute;
+
+    OSStatus VirtualMasterVolumeresult = CA_GET_O(device, kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
+                                                    &VirtualMasterVolume);
+
+    OSStatus VirtualMasterBalanceresult = CA_GET_O(device, kAudioHardwareServiceDeviceProperty_VirtualMainBalance,
+                                                    &VirtualMasterBalance);
+
+    OSStatus subvloume = CA_GET_O(device, kAudioDevicePropertySubVolumeScalar, &SubVolumeScalar);
+
+    OSStatus subvloumedb = CA_GET_O(device, kAudioDevicePropertySubVolumeDecibels, &SubVolumeDecibels);
+
+    OSStatus muteresult = CA_GET_O(device, kAudioDevicePropertyMute, &mute);
+
+    OSStatus submuteresult = CA_GET_O(device, kAudioDevicePropertySubMute, &submute);
+
+    if ((muteresult == noErr) && (mute == 1)){
+        MP_VERBOSE(ao, "Device is in mute\n");
+    }else{
+        if (VirtualMasterVolumeresult == noErr){
+            MP_VERBOSE(ao, "Virtual main volume: %.2f\n", VirtualMasterVolume);
+        }
+
+        if (VirtualMasterBalanceresult == noErr){
+            MP_VERBOSE(ao, "Virtual main balance: %g\n", VirtualMasterBalance);
+        }
+
+        if ((subvloume == noErr) && (subvloumedb == noErr) && (submuteresult == noErr)){
+            if (submute == 1){
+                MP_VERBOSE(ao, "LFE channel is in mute\n");
+            }else{
+                MP_VERBOSE(ao, "LFE volume: %.2f (%.1f dB)\n", SubVolumeScalar, SubVolumeDecibels);
+            }
+        }
+
+        for (UInt32 j = 0; j <= channel;j++){
+            AudioObjectPropertyAddress prop = {kAudioDevicePropertyVolumeScalar, kAudioDevicePropertyScopeOutput, j};
+            AudioObjectPropertyAddress prop_db = {kAudioDevicePropertyVolumeDecibels, kAudioDevicePropertyScopeOutput, j};
+            AudioObjectPropertyAddress prop_mute = {kAudioDevicePropertyMute, kAudioDevicePropertyScopeOutput,j};
+
+            if (AudioObjectHasProperty(device, &prop)){
+                OSStatus VolumeScalar = AudioObjectGetPropertyData(device, &prop, 0, NULL,
+                    &dataSize, &volume);
+
+                OSStatus VolumeDecibels = AudioObjectGetPropertyData(device, &prop_db, 0, NULL,
+                    &dataSize, &volumedb);
+
+                OSStatus channel_mute = AudioObjectGetPropertyData(device, &prop_mute, 0, NULL, &dataSize,
+                    &channelmute);
+
+                if (j == 0){ // Channel 0  is master, if available
+                    if ((VolumeScalar == noErr) && (VolumeDecibels == noErr)){
+                        if (channel_mute == noErr){  
+                            if (channelmute == 1){
+                                MP_VERBOSE(ao, "Main channel is in mute\n");
+                            }
+                        }
+                        MP_VERBOSE(ao, "Main volume: %.2f (%.1f dB)\n", volume, volumedb);
+                    }
+                }else{
+                    if ((VolumeScalar == noErr) && (VolumeDecibels == noErr)){
+                        if (channelmute == 1){
+                            MP_VERBOSE(ao, "Channel %u is in mute\n", j);
+                        }else{
+                        MP_VERBOSE(ao, "Channel %u volume: %.2f (%.1f dB)\n", j, volume, volumedb);
+                        }
+                    }else{
+                        MP_VERBOSE(ao, "Channel %u volume is not available\n", j);   
+                    }
+                }
+            }
+        }
+    }
+    return noErr;
 }
 
 OSStatus ca_select_device(struct ao *ao, char* name, AudioDeviceID *device)
@@ -103,29 +343,40 @@ OSStatus ca_select_device(struct ao *ao, char* name, AudioDeviceID *device)
         err = AudioObjectGetPropertyData(
             kAudioObjectSystemObject, &p_addr, 0, 0, &size, &v);
         CFRelease(uid);
-        CHECK_CA_ERROR("unable to query for device UID");
+        CHECK_CA_ERROR("Unable to query for device UID");
 
         uint32_t is_alive = 1;
         err = CA_GET(*device, kAudioDevicePropertyDeviceIsAlive, &is_alive);
-        CHECK_CA_ERROR("could not check whether device is alive (invalid device?)");
+        CHECK_CA_ERROR("Could not check whether device is alive (invalid device?)");
 
         if (!is_alive)
-            MP_WARN(ao, "device is not alive!\n");
+            MP_WARN(ao, "Device is not alive!\n");
     } else {
         // device not set by user, get the default one
         err = CA_GET(kAudioObjectSystemObject,
                      kAudioHardwarePropertyDefaultOutputDevice,
                      device);
-        CHECK_CA_ERROR("could not get default audio device");
+        CHECK_CA_ERROR("Could not get default audio device");
     }
 
     if (mp_msg_test(ao->log, MSGL_V)) {
         char *desc;
+        char *manufacturer;
+        char *UID;
         OSStatus err2 = CA_GET_STR(*device, kAudioObjectPropertyName, &desc);
-        if (err2 == noErr) {
-            MP_VERBOSE(ao, "selected audio output device: %s (%" PRIu32 ")\n",
-                           desc, *device);
+        OSStatus err3 = CA_GET_STR(*device, kAudioObjectPropertyManufacturer, &manufacturer);
+        OSStatus err4 = CA_GET_STR(*device, kAudioDevicePropertyDeviceUID, &UID);
+        if (err2 == noErr && err3 == noErr){
+            MP_VERBOSE(ao, "Selected audio device: %s (%s)\n", desc, manufacturer);
+        }else{
+            MP_VERBOSE(ao, "Selected audio device: %s\n", desc);
+        }
+
+        if (err2 == noErr && err4 == noErr){
+            MP_VERBOSE(ao, "Device ID: 0x%0X (UID: %s)\n", *device, UID);
             talloc_free(desc);
+            talloc_free(manufacturer);
+            talloc_free(UID);
         }
     }
 
@@ -200,30 +451,83 @@ static uint32_t ca_normalize_formatid(uint32_t formatID)
 }
 
 bool ca_asbd_equals(const AudioStreamBasicDescription *a,
-                    const AudioStreamBasicDescription *b)
+                    const AudioStreamBasicDescription *b,
+                    int integer_mode_hack)
 {
-    int flags = kAudioFormatFlagIsPacked | kAudioFormatFlagIsFloat |
-                kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsBigEndian;
     bool spdif = ca_formatid_is_compressed(a->mFormatID) &&
                  ca_formatid_is_compressed(b->mFormatID);
 
-    return (a->mFormatFlags & flags) == (b->mFormatFlags & flags) &&
-           a->mBitsPerChannel == b->mBitsPerChannel &&
-           ca_normalize_formatid(a->mFormatID) ==
-                ca_normalize_formatid(b->mFormatID) &&
-           (spdif || a->mBytesPerPacket == b->mBytesPerPacket) &&
-           (spdif || a->mChannelsPerFrame == b->mChannelsPerFrame) &&
-           a->mSampleRate == b->mSampleRate;
+    if (integer_mode_hack == 1){
+        int flags = kAudioFormatFlagIsFloat | // unpacked 24 bit device is NOT packed.
+        kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsBigEndian;
+
+        return (a->mFormatFlags & flags) == (b->mFormatFlags & flags) &&
+              a->mBitsPerChannel >= b->mBitsPerChannel && // mpv doesn't have s24, only s32.
+              ca_normalize_formatid(a->mFormatID) ==
+              ca_normalize_formatid(b->mFormatID) &&
+              (spdif || a->mBytesPerPacket == b->mBytesPerPacket) &&
+              (spdif || a->mChannelsPerFrame == b->mChannelsPerFrame) &&
+              a->mSampleRate == b->mSampleRate;
+
+    }else if(integer_mode_hack == 2){
+        int flags = kAudioFormatFlagIsNonMixable | kAudioFormatFlagIsFloat |
+        kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsBigEndian;
+
+        return (a->mFormatFlags & flags) == (b->mFormatFlags & flags) &&
+              a->mBitsPerChannel == b->mBitsPerChannel &&
+              ca_normalize_formatid(a->mFormatID) ==
+              ca_normalize_formatid(b->mFormatID) &&
+              (spdif || a->mBytesPerPacket == b->mBytesPerPacket) &&
+              (spdif || a->mChannelsPerFrame == b->mChannelsPerFrame) &&
+              a->mSampleRate == b->mSampleRate;
+
+    }else if(integer_mode_hack == 3){ // for packed 24 bit device
+        int flags = kAudioFormatFlagIsPacked | kAudioFormatFlagIsFloat |
+        kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsBigEndian;
+
+        return (a->mFormatFlags & flags) == (b->mFormatFlags & flags) &&
+              a->mBitsPerChannel >= b->mBitsPerChannel &&
+              ca_normalize_formatid(a->mFormatID) ==
+              ca_normalize_formatid(b->mFormatID) &&
+              (spdif || a->mBytesPerPacket >= b->mBytesPerPacket) && // mpv's is 4, device's is 3.
+              (spdif || a->mChannelsPerFrame == b->mChannelsPerFrame) &&
+              a->mSampleRate == b->mSampleRate;
+
+    }else{
+        int flags = kAudioFormatFlagIsPacked | kAudioFormatFlagIsFloat |
+        kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsBigEndian;
+
+        return (a->mFormatFlags & flags) == (b->mFormatFlags & flags) &&
+              a->mBitsPerChannel == b->mBitsPerChannel &&
+              ca_normalize_formatid(a->mFormatID) ==
+              ca_normalize_formatid(b->mFormatID) &&
+              (spdif || a->mBytesPerPacket == b->mBytesPerPacket) &&
+              (spdif || a->mChannelsPerFrame == b->mChannelsPerFrame) &&
+              a->mSampleRate == b->mSampleRate;
+    }
 }
 
 // Return the AF_FORMAT_* (AF_FORMAT_S16 etc.) corresponding to the asbd.
-int ca_asbd_to_mp_format(const AudioStreamBasicDescription *asbd)
+int ca_asbd_to_mp_format(const AudioStreamBasicDescription *asbd,
+                        int integer_mode_hack,
+                        int packed_24_hack)
 {
     for (int fmt = 1; fmt < AF_FORMAT_COUNT; fmt++) {
         AudioStreamBasicDescription mp_asbd = {0};
         ca_fill_asbd_raw(&mp_asbd, fmt, asbd->mSampleRate, asbd->mChannelsPerFrame);
-        if (ca_asbd_equals(&mp_asbd, asbd))
+
+        if (integer_mode_hack == 1){
+            if (packed_24_hack == 1){
+                if (ca_asbd_equals(&mp_asbd, asbd, 3))
+                return af_fmt_is_spdif(fmt) ? AF_FORMAT_S_AC3 : fmt;
+            }else{
+                if (ca_asbd_equals(&mp_asbd, asbd, 1))
+                return af_fmt_is_spdif(fmt) ? AF_FORMAT_S_AC3 : fmt;
+            }
+        }else{
+            if (ca_asbd_equals(&mp_asbd, asbd, 0))
             return af_fmt_is_spdif(fmt) ? AF_FORMAT_S_AC3 : fmt;
+        }
     }
     return 0;
 }
@@ -232,24 +536,26 @@ void ca_print_asbd(struct ao *ao, const char *description,
                    const AudioStreamBasicDescription *asbd)
 {
     uint32_t flags  = asbd->mFormatFlags;
-    char *format    = mp_tag_str(asbd->mFormatID);
-    int mpfmt       = ca_asbd_to_mp_format(asbd);
+    char *format    = mp_tag_str(CFSwapInt32HostToBig(asbd->mFormatID));
+    int mpfmt       = ca_asbd_to_mp_format(asbd, 1, 0);
 
     MP_VERBOSE(ao,
-        "%s %7.1fHz %" PRIu32 "bit %s "
-        "[%" PRIu32 "][%" PRIu32 "bpp][%" PRIu32 "fbp]"
-        "[%" PRIu32 "bpf][%" PRIu32 "ch] "
-        "%s %s %s%s%s%s (%s)\n",
-        description, asbd->mSampleRate, asbd->mBitsPerChannel, format,
-        asbd->mFormatFlags, asbd->mBytesPerPacket, asbd->mFramesPerPacket,
-        asbd->mBytesPerFrame, asbd->mChannelsPerFrame,
-        (flags & kAudioFormatFlagIsFloat) ? "float" : "int",
-        (flags & kAudioFormatFlagIsBigEndian) ? "BE" : "LE",
-        (flags & kAudioFormatFlagIsSignedInteger) ? "S" : "U",
-        (flags & kAudioFormatFlagIsPacked) ? " packed" : "",
-        (flags & kAudioFormatFlagIsAlignedHigh) ? " aligned" : "",
-        (flags & kAudioFormatFlagIsNonInterleaved) ? " P" : "",
-        mpfmt ? af_fmt_to_str(mpfmt) : "-");
+       "%s%s %" PRIu32 "Bit/%gkHz "
+       "[%" PRIu32 "][%" PRIu32 "bpp][%" PRIu32 "fbp]"
+       "[%" PRIu32 "bpf][%" PRIu32 "ch] "
+       "%s%s%s%s%s(%s)\n",
+       description, format, asbd->mBitsPerChannel, asbd->mSampleRate / 1000,
+       asbd->mFormatFlags, asbd->mBytesPerPacket, asbd->mFramesPerPacket,
+       asbd->mBytesPerFrame, asbd->mChannelsPerFrame,
+       (flags & kAudioFormatFlagIsFloat) ? "F " :
+       ((flags & kAudioFormatFlagIsSignedInteger) && (flags | kAudioFormatFlagIsFloat)) ? "Int " : "Uint ",
+       (flags & kAudioFormatFlagIsPacked) ? "P ":
+       ((flags & kAudioFormatFlagIsAlignedHigh) && (flags | kAudioFormatFlagIsPacked)) ? "High ":
+       ((flags | kAudioFormatFlagIsAlignedHigh) && (flags | kAudioFormatFlagIsPacked)) ? "Low ":"",
+       (flags & kAudioFormatFlagIsBigEndian) ? "BE " : "LE ",
+       (flags & kAudioFormatFlagIsNonInterleaved) ? "NonIntl" : "Intl",
+       (flags & kAudioFormatFlagIsNonMixable) ? " Nonmix " : " Mix ", // "Unmixable" indicates integer mode.
+       mpfmt ? af_fmt_to_str(mpfmt) : "-");
 }
 
 // Return whether new is an improvement over old. Assume a higher value means
@@ -268,7 +574,9 @@ static bool value_is_better(double req, double old, double new)
 // Return whether new is an improvement over old (req is the requested format).
 bool ca_asbd_is_better(AudioStreamBasicDescription *req,
                        AudioStreamBasicDescription *old,
-                       AudioStreamBasicDescription *new)
+                       AudioStreamBasicDescription *new,
+                       int mixableflag,
+                       int bytesflag)
 {
     if (new->mChannelsPerFrame > MP_NUM_CHANNELS)
         return false;
@@ -279,9 +587,24 @@ bool ca_asbd_is_better(AudioStreamBasicDescription *req,
     if (req->mFormatID != old->mFormatID)
         return true;
 
-    if (!value_is_better(req->mBitsPerChannel, old->mBitsPerChannel,
-                         new->mBitsPerChannel))
-        return false;
+    // Force physical format to be 24/32 bit.
+    if (bytesflag == 1){
+        if (!value_is_better(6, old->mBytesPerFrame,
+                         new->mBytesPerFrame))
+            return false;
+    }else{
+        if (!value_is_better(req->mBitsPerChannel, old->mBitsPerChannel,
+                             new->mBitsPerChannel))
+            return false;
+    }
+
+    // Force virtual format to be 32 bit float.
+    if (mixableflag == 1){
+        if ((req->mFormatFlags & kAudioFormatFlagIsNonMixable) != (new->mFormatFlags & kAudioFormatFlagIsNonMixable))
+            return false;
+        if ((req->mFormatFlags & kAudioFormatFlagIsNonMixable) != (old->mFormatFlags & kAudioFormatFlagIsNonMixable))
+            return true;
+    }
 
     if (!value_is_better(req->mSampleRate, old->mSampleRate, new->mSampleRate))
         return false;
@@ -333,7 +656,7 @@ bool ca_stream_supports_compressed(struct ao *ao, AudioStreamID stream)
         CA_GET_ARY(stream, kAudioStreamPropertyAvailablePhysicalFormats,
                    &formats, &n_formats);
 
-    CHECK_CA_ERROR("Could not get number of stream formats.");
+    CHECK_CA_ERROR("Could not get number of stream formats");
 
     for (int i = 0; i < n_formats; i++) {
         AudioStreamBasicDescription asbd = formats[i].mFormat;
@@ -387,7 +710,7 @@ static OSStatus ca_change_mixing(struct ao *ao, AudioDeviceID device,
         err = CA_SETTABLE(device, kAudioDevicePropertySupportsMixing,
                           &writeable);
 
-        if (!CHECK_CA_WARN("can't tell if mixing property is settable")) {
+        if (!CHECK_CA_WARN("Can't tell if mixing property is settable")) {
             return err;
         }
 
@@ -398,7 +721,7 @@ static OSStatus ca_change_mixing(struct ao *ao, AudioDeviceID device,
         if (err != noErr)
             return err;
 
-        if (!CHECK_CA_WARN("can't set mix mode")) {
+        if (!CHECK_CA_WARN("Can't set mix mode")) {
             return err;
         }
 
@@ -434,22 +757,20 @@ int64_t ca_get_device_latency_ns(struct ao *ao, AudioDeviceID device)
     for (int n = 0; n < MP_ARRAY_SIZE(latency_properties); n++) {
         uint32_t temp;
         OSStatus err = CA_GET_O(device, latency_properties[n], &temp);
-        CHECK_CA_WARN("cannot get device latency");
+        CHECK_CA_WARN("Cannot get device latency");
         if (err == noErr) {
             latency_frames += temp;
             MP_VERBOSE(ao, "Latency property %s: %d frames\n",
-                       mp_tag_str(latency_properties[n]), (int)temp);
+                       mp_tag_str(CFSwapInt32HostToBig(latency_properties[n])), (int)temp);
         }
     }
 
-    double sample_rate;
+    double sample_rate = ao->samplerate;
     OSStatus err = CA_GET_O(device, kAudioDevicePropertyNominalSampleRate,
                             &sample_rate);
-    CHECK_CA_WARN("cannot get device sample rate, falling back to AO sample rate!");
+    CHECK_CA_WARN("Cannot get device sample rate, falling back to AO sample rate!");
     if (err == noErr) {
-        MP_VERBOSE(ao, "Device sample rate: %f\n", sample_rate);
-    } else {
-        sample_rate = ao->samplerate;
+        MP_VERBOSE(ao, "Device sample rate: %.0f Hz\n", sample_rate);
     }
 
     return MP_TIME_S_TO_NS(latency_frames / sample_rate);
@@ -475,13 +796,13 @@ bool ca_change_physical_format_sync(struct ao *ao, AudioStreamID stream,
     OSStatus err = noErr;
     bool format_set = false;
 
-    ca_print_asbd(ao, "setting stream physical format:", &change_format);
+    ca_print_asbd(ao, "Setting stream physical format: ", &change_format);
 
     AudioStreamBasicDescription prev_format;
     err = CA_GET(stream, kAudioStreamPropertyPhysicalFormat, &prev_format);
-    CHECK_CA_ERROR("can't get current physical format");
+    CHECK_CA_ERROR("Can't get current physical format");
 
-    ca_print_asbd(ao, "format in use before switching:", &prev_format);
+    ca_print_asbd(ao, "Format in use before switching: ", &prev_format);
 
     /* Install the callback. */
     AudioObjectPropertyAddress p_addr = {
@@ -493,13 +814,11 @@ bool ca_change_physical_format_sync(struct ao *ao, AudioStreamID stream,
     err = AudioObjectAddPropertyListener(stream, &p_addr,
                                          ca_change_format_listener,
                                          sem);
-    CHECK_CA_ERROR("can't add property listener during format change");
-
-    mp_mutex_lock(&sem->mutex);
+    CHECK_CA_ERROR("Can't add property listener during format change");
 
     /* Change the format. */
     err = CA_SET(stream, kAudioStreamPropertyPhysicalFormat, &change_format);
-    CHECK_CA_WARN("error changing physical format");
+    CHECK_CA_WARN("Error changing physical format");
 
     /* The AudioStreamSetProperty is not only asynchronous,
      * it is also not Atomic, in its behaviour. */
@@ -507,35 +826,36 @@ bool ca_change_physical_format_sync(struct ao *ao, AudioStreamID stream,
     AudioStreamBasicDescription actual_format = {0};
     while (1) {
         err = CA_GET(stream, kAudioStreamPropertyPhysicalFormat, &actual_format);
-        if (!CHECK_CA_WARN("could not retrieve physical format"))
+        if (!CHECK_CA_WARN("Could not retrieve physical format"))
             break;
 
-        format_set = ca_asbd_equals(&change_format, &actual_format);
+        format_set = ca_asbd_equals(&change_format, &actual_format, 2);
         if (format_set)
             break;
 
-        if (mp_cond_timedwait_until(&sem->cond, &sem->mutex, wait_until)) {
-            MP_VERBOSE(ao, "reached timeout\n");
+        if (mp_cond_timedwait_until(&sem->cond, &sem->mutex,
+            wait_until)) {
+            MP_VERBOSE(ao, "Reached timeout\n");
             break;
         }
     }
 
     mp_mutex_unlock(&sem->mutex);
 
-    ca_print_asbd(ao, "actual format in use:", &actual_format);
+    ca_print_asbd(ao, "Actual format in use: ", &actual_format);
 
     if (!format_set) {
-        MP_WARN(ao, "changing physical format failed\n");
+        MP_WARN(ao, "Changing physical format failed\n");
         // Some drivers just fuck up and get into a broken state. Restore the
         // old format in this case.
         err = CA_SET(stream, kAudioStreamPropertyPhysicalFormat, &prev_format);
-        CHECK_CA_WARN("error restoring physical format");
+        CHECK_CA_WARN("Error restoring physical format");
     }
 
     err = AudioObjectRemovePropertyListener(stream, &p_addr,
                                             ca_change_format_listener,
                                             sem);
-    CHECK_CA_ERROR("can't remove property listener");
+    CHECK_CA_ERROR("Can't remove property listener");
 
 coreaudio_error:
     return format_set;
